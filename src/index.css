@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+@theme {
+  --font-heebo: "Heebo", sans-serif;
+  --color-primary: #1e3a5f;
+  --color-primary-light: #2a5a8f;
+  --color-accent: #f59e0b;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+}
+
+body {
+  font-family: var(--font-heebo);
+  background-color: #f8fafc;
+  color: #1e293b;
+  -webkit-tap-highlight-color: transparent;
+}
