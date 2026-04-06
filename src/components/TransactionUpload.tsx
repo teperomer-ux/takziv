@@ -15,6 +15,8 @@ function mockParseFile(file: File): Promise<Omit<Transaction, "id">[]> {
             category: "מזון וטיפוח",
             subCategory: "סופרמרקט",
             status: "draft",
+            billingMonth: 3,
+            billingYear: 2026,
           },
           {
             date: "2026-03-14",
@@ -23,6 +25,8 @@ function mockParseFile(file: File): Promise<Omit<Transaction, "id">[]> {
             category: "תחבורה",
             subCategory: "דלק",
             status: "draft",
+            billingMonth: 3,
+            billingYear: 2026,
           },
           {
             date: "2026-03-12",
@@ -31,6 +35,8 @@ function mockParseFile(file: File): Promise<Omit<Transaction, "id">[]> {
             category: "דיור",
             subCategory: "חשמל",
             status: "draft",
+            billingMonth: 3,
+            billingYear: 2026,
           },
         ]),
       800

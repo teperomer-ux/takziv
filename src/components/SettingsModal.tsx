@@ -1,25 +1,39 @@
-import { useState } from "react";
-import { X, User, Grid3X3, Database, Palette, Trash2, Pencil, Plus, ChevronDown, ChevronLeft } from "lucide-react";
+import { useState, useEffect } from "react";
+import { X, Grid3X3, Database, Palette, Wallet, Trash2, Pencil, Plus, ChevronDown, ChevronLeft } from "lucide-react";
 import { useSettings } from "../hooks/useSettings";
 import { useCategories } from "../hooks/useCategories";
 import { clearAllMappings } from "../services/mappingService";
+import { auth } from "../lib/firebase";
+import {
+  getFinancialProfile,
+  saveFinancialProfile,
+} from "../services/userProfileService";
+import {
+  BANKS,
+  CREDIT_CARDS,
+  DEFAULT_FINANCIAL_PROFILE,
+  getAvailableClubs,
+  getAvailableWallets,
+  type UserFinancialProfile,
+  type FinancialOption,
+} from "../types/userProfile";
 
 interface Props {
   open: boolean;
   onClose: () => void;
 }
 
-type TabKey = "profile" | "categories" | "data" | "theme";
+type TabKey = "categories" | "data" | "theme" | "financial";
 
-const TABS: { key: TabKey; label: string; icon: typeof User }[] = [
-  { key: "profile", label: "פרופיל והכנסה", icon: User },
+const TABS: { key: TabKey; label: string; icon: typeof Grid3X3 }[] = [
   { key: "categories", label: "ניהול סעיפים", icon: Grid3X3 },
   { key: "data", label: "ניהול נתונים", icon: Database },
   { key: "theme", label: "מראה", icon: Palette },
+  { key: "financial", label: "פרופיל פיננסי", icon: Wallet },
 ];
 
 export default function SettingsModal({ open, onClose }: Props) {
-  const [tab, setTab] = useState<TabKey>("profile");
+  const [tab, setTab] = useState<TabKey>("categories");
 
   if (!open) return null;
 
@@ -32,10 +46,10 @@ export default function SettingsModal({ open, onClose }: Props) {
       />
 
       {/* Modal */}
-      <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col overflow-hidden">
+      <div className="relative bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-          <h2 className="text-lg font-bold text-slate-800">הגדרות</h2>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-700">
+          <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100">הגדרות</h2>
           <button
             onClick={onClose}
             className="p-1.5 rounded-lg hover:bg-slate-100 transition-colors text-slate-400"
@@ -45,7 +59,7 @@ export default function SettingsModal({ open, onClose }: Props) {
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-slate-100 px-2 overflow-x-auto scrollbar-hide">
+        <div className="flex border-b border-slate-100 dark:border-slate-700 px-2 overflow-x-auto scrollbar-hide">
           {TABS.map((t) => {
             const Icon = t.icon;
             const active = tab === t.key;
@@ -68,106 +82,11 @@ export default function SettingsModal({ open, onClose }: Props) {
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
-          {tab === "profile" && <ProfileTab />}
           {tab === "categories" && <CategoriesTab />}
           {tab === "data" && <DataTab />}
           {tab === "theme" && <ThemeTab />}
+          {tab === "financial" && <FinancialProfileTab />}
         </div>
-      </div>
-    </div>
-  );
-}
-
-// ─── Profile & Income Tab ──────────────────────────────────────────────────
-
-function ProfileTab() {
-  const { settings, updateSettings } = useSettings();
-  const [p1Name, setP1Name] = useState(settings.partner1Name);
-  const [p2Name, setP2Name] = useState(settings.partner2Name);
-  const [p1Inc, setP1Inc] = useState(String(settings.partner1Income || ""));
-  const [p2Inc, setP2Inc] = useState(String(settings.partner2Income || ""));
-  const [saved, setSaved] = useState(false);
-
-  async function handleSave() {
-    await updateSettings({
-      partner1Name: p1Name.trim() || "בן/בת זוג 1",
-      partner2Name: p2Name.trim() || "בן/בת זוג 2",
-      partner1Income: parseFloat(p1Inc.replace(/[^\d.]/g, "")) || 0,
-      partner2Income: parseFloat(p2Inc.replace(/[^\d.]/g, "")) || 0,
-    });
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  }
-
-  return (
-    <div className="space-y-5">
-      <p className="text-sm text-slate-500">
-        הגדירו את שמות בני הזוג וההכנסה החודשית לחישוב השורה התחתונה.
-      </p>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">
-            שם בן/בת זוג 1
-          </label>
-          <input
-            type="text"
-            value={p1Name}
-            onChange={(e) => setP1Name(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-primary focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">
-            שם בן/בת זוג 2
-          </label>
-          <input
-            type="text"
-            value={p2Name}
-            onChange={(e) => setP2Name(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-primary focus:outline-none"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">
-            הכנסה חודשית (₪)
-          </label>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={p1Inc}
-            onChange={(e) => setP1Inc(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-primary focus:outline-none"
-            dir="ltr"
-            placeholder="0"
-          />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">
-            הכנסה חודשית (₪)
-          </label>
-          <input
-            type="text"
-            inputMode="numeric"
-            value={p2Inc}
-            onChange={(e) => setP2Inc(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-primary focus:outline-none"
-            dir="ltr"
-            placeholder="0"
-          />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-3">
-        <button
-          onClick={handleSave}
-          className="rounded-lg bg-primary text-white px-5 py-2 text-sm font-medium hover:bg-primary/90 transition-colors"
-        >
-          שמור
-        </button>
-        {saved && (
-          <span className="text-xs text-emerald-600 font-medium">נשמר בהצלחה</span>
-        )}
       </div>
     </div>
   );
@@ -231,7 +150,7 @@ function CategoriesTab() {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-slate-500">
+        <p className="text-sm text-slate-500 dark:text-slate-400">
           {categoryNames.length} סעיפים
         </p>
         <button
@@ -435,9 +354,11 @@ function DataTab() {
   const [confirmClear, setConfirmClear] = useState(false);
 
   async function handleClear() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
     setClearing(true);
     try {
-      await clearAllMappings();
+      await clearAllMappings(uid);
       setCleared(true);
       setConfirmClear(false);
       setTimeout(() => setCleared(false), 3000);
@@ -505,36 +426,183 @@ function ThemeTab() {
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-slate-500">בחרו את מראה האפליקציה.</p>
+      <p className="text-sm text-slate-500 dark:text-slate-400">בחרו את מראה האפליקציה.</p>
 
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={() => updateSettings({ theme: "light" })}
           className={`flex flex-col items-center gap-2 rounded-xl border-2 p-4 transition-colors ${
             settings.theme === "light"
-              ? "border-primary bg-primary/5"
-              : "border-slate-200 hover:border-slate-300"
+              ? "border-primary bg-primary/5 dark:bg-primary/10"
+              : "border-slate-200 dark:border-slate-600 hover:border-slate-300"
           }`}
         >
           <div className="h-10 w-10 rounded-full bg-white border border-slate-200 shadow-sm" />
-          <span className="text-sm font-medium text-slate-700">בהיר</span>
+          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">בהיר</span>
         </button>
         <button
           onClick={() => updateSettings({ theme: "dark" })}
           className={`flex flex-col items-center gap-2 rounded-xl border-2 p-4 transition-colors ${
             settings.theme === "dark"
-              ? "border-primary bg-primary/5"
-              : "border-slate-200 hover:border-slate-300"
+              ? "border-primary bg-primary/5 dark:bg-primary/10"
+              : "border-slate-200 dark:border-slate-600 hover:border-slate-300"
           }`}
         >
           <div className="h-10 w-10 rounded-full bg-slate-800 border border-slate-600 shadow-sm" />
-          <span className="text-sm font-medium text-slate-700">כהה</span>
+          <span className="text-sm font-medium text-slate-700 dark:text-slate-300">כהה</span>
         </button>
       </div>
 
       {settings.theme === "dark" && (
         <p className="text-xs text-slate-400">
           מצב כהה ישפיע על הרקע הראשי וצבעי הכרטיסים.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── Financial Profile Tab ────────────────────────────────────────────────
+
+function SettingsChipGrid({
+  options,
+  selected,
+  onToggle,
+}: {
+  options: FinancialOption[];
+  selected: string[];
+  onToggle: (id: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map((opt) => {
+        const active = selected.includes(opt.id);
+        return (
+          <button
+            key={opt.id}
+            type="button"
+            onClick={() => onToggle(opt.id)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all duration-150 ${
+              active
+                ? "bg-primary text-white border-primary shadow-sm"
+                : "bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-600 hover:border-slate-300 dark:hover:border-slate-500"
+            }`}
+          >
+            {opt.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function FinancialProfileTab() {
+  const [profile, setProfile] = useState<UserFinancialProfile>({
+    ...DEFAULT_FINANCIAL_PROFILE,
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    getFinancialProfile()
+      .then((p) => setProfile(p))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const availableClubs = getAvailableClubs(profile.banks, profile.creditCards);
+  const availableWallets = getAvailableWallets(profile.consumerClubs);
+  const hasSelection = profile.banks.length > 0 || profile.creditCards.length > 0;
+
+  function toggle(key: keyof UserFinancialProfile, id: string) {
+    setSaved(false);
+    setProfile((prev) => {
+      const arr = prev[key];
+      const next = {
+        ...prev,
+        [key]: arr.includes(id)
+          ? arr.filter((v) => v !== id)
+          : [...arr, id],
+      };
+      if (key === "banks" || key === "creditCards") {
+        const validClubIds = new Set(
+          getAvailableClubs(next.banks, next.creditCards).map((c) => c.id),
+        );
+        next.consumerClubs = next.consumerClubs.filter((c) => validClubIds.has(c));
+      }
+      if (key === "banks" || key === "creditCards" || key === "consumerClubs") {
+        const validWalletIds = new Set(
+          getAvailableWallets(next.consumerClubs).map((w) => w.id),
+        );
+        next.walletsAndVouchers = next.walletsAndVouchers.filter((w) => validWalletIds.has(w));
+      }
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await saveFinancialProfile(profile);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (err) {
+      console.error("[Settings] save financial profile failed:", err);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return <p className="text-sm text-slate-400 text-center py-6">טוען פרופיל...</p>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <p className="text-sm text-slate-500 dark:text-slate-400">
+        בחרו את המוצרים הפיננסיים שלכם כדי לקבל המלצות חיסכון מותאמות אישית.
+      </p>
+
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">בנקים</h3>
+        <SettingsChipGrid options={BANKS} selected={profile.banks} onToggle={(id) => toggle("banks", id)} />
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">כרטיסי אשראי</h3>
+        <SettingsChipGrid options={CREDIT_CARDS} selected={profile.creditCards} onToggle={(id) => toggle("creditCards", id)} />
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">מועדוני צרכנות</h3>
+        {hasSelection ? (
+          availableClubs.length > 0 ? (
+            <SettingsChipGrid options={availableClubs} selected={profile.consumerClubs} onToggle={(id) => toggle("consumerClubs", id)} />
+          ) : (
+            <p className="text-xs text-slate-400 py-1">לא נמצאו מועדונים תואמים</p>
+          )
+        ) : (
+          <p className="text-xs text-slate-400 py-1">בחרו בנק או כרטיס כדי לראות מועדונים</p>
+        )}
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">ארנקים ושוברים</h3>
+        <SettingsChipGrid options={availableWallets} selected={profile.walletsAndVouchers} onToggle={(id) => toggle("walletsAndVouchers", id)} />
+      </div>
+
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-bold shadow-sm hover:shadow-md transition-all disabled:opacity-50"
+      >
+        {saving ? "שומר..." : "שמור פרופיל"}
+      </button>
+
+      {saved && (
+        <p className="text-xs text-emerald-600 font-medium text-center">
+          הפרופיל נשמר בהצלחה.
         </p>
       )}
     </div>

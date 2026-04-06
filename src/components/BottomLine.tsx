@@ -1,27 +1,20 @@
-import { useSettings } from "../hooks/useSettings";
-
 interface Props {
+  totalIncome: number;
   totalSpent: number;
-  expectedRecurring: number;
   year: number;
   month: number;
-  onOpenSettings: () => void;
 }
 
 export default function BottomLine({
+  totalIncome,
   totalSpent,
-  expectedRecurring,
   year,
   month,
-  onOpenSettings,
 }: Props) {
-  const { settings } = useSettings();
-  const p1 = settings.partner1Income;
-  const p2 = settings.partner2Income;
-  const income = p1 + p2;
+  const income = totalIncome;
 
   // ── Calculations ────────────────────────────────────────────────
-  const freeCash = income - totalSpent - expectedRecurring;
+  const freeCash = income - totalSpent;
 
   const today = new Date();
   const isCurrentMonth =
@@ -52,26 +45,15 @@ export default function BottomLine({
   // ── Breakdown bar segments ──────────────────────────────────────
   const barBase = Math.max(income, 1);
   const spentPct = Math.min((totalSpent / barBase) * 100, 100);
-  const recurPct = Math.min((expectedRecurring / barBase) * 100, 100 - spentPct);
-  const freePct = Math.max(100 - spentPct - recurPct, 0);
+  const freePct = Math.max(100 - spentPct, 0);
 
-  // Partner contribution %
-  const p1Pct = income > 0 ? Math.round((p1 / income) * 100) : 0;
-  const p2Pct = income > 0 ? 100 - p1Pct : 0;
-
-  // ── No income set ───────────────────────────────────────────────
+  // ── No income uploaded ────────────────────────────────────────────
   if (income === 0) {
     return (
-      <div className="rounded-xl bg-white border border-dashed border-slate-300 p-5 mb-5 text-center">
-        <p className="text-sm text-slate-500 mb-3">
-          הגדירו הכנסה חודשית כדי לראות את השורה התחתונה
+      <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-dashed border-slate-200 dark:border-slate-700 p-6 mb-5 text-center">
+        <p className="text-sm text-slate-500 mb-2">
+          העלו דף עו״ש בלשונית ״הכנסות״ כדי לראות את השורה התחתונה
         </p>
-        <button
-          onClick={onOpenSettings}
-          className="rounded-lg bg-primary text-white px-4 py-2 text-sm font-medium shadow-sm hover:bg-primary/90 transition-colors"
-        >
-          הגדרת הכנסה חודשית
-        </button>
       </div>
     );
   }
@@ -79,34 +61,13 @@ export default function BottomLine({
   return (
     <div className="mb-5">
       <div
-        className={`rounded-2xl bg-gradient-to-bl ${heroColor} p-5 text-white shadow-lg`}
+        className={`rounded-2xl bg-gradient-to-bl ${heroColor} p-5 text-white shadow-lg ring-1 ring-black/5`}
       >
         {/* ── Income display ─────────────────────────────────── */}
         <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3 text-xs text-white/70">
-            <span>
-              הכנסה משותפת: {income.toLocaleString("he-IL")} ₪
-            </span>
-            {p1 > 0 && p2 > 0 && (
-              <span className="text-[10px] text-white/50">
-                ({p1Pct}% / {p2Pct}%)
-              </span>
-            )}
-          </div>
-          <button
-            onClick={onOpenSettings}
-            className="p-1 rounded-md hover:bg-white/15 transition-colors"
-            aria-label="ערוך הכנסה"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="h-3.5 w-3.5 text-white/60"
-              viewBox="0 0 20 20"
-              fill="currentColor"
-            >
-              <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-            </svg>
-          </button>
+          <span className="text-xs text-white/70">
+            הכנסה כוללת: {income.toLocaleString("he-IL")} ₪
+          </span>
         </div>
 
         {/* The Bottom Line */}
@@ -151,13 +112,6 @@ export default function BottomLine({
                 title={`הוצאות: ${Math.round(totalSpent).toLocaleString("he-IL")} ₪`}
               />
             )}
-            {recurPct > 0 && (
-              <div
-                className="bg-white/40 transition-all duration-500"
-                style={{ width: `${recurPct}%` }}
-                title={`חיובים צפויים: ${Math.round(expectedRecurring).toLocaleString("he-IL")} ₪`}
-              />
-            )}
             {freePct > 0 && (
               <div
                 className="transition-all duration-500"
@@ -171,10 +125,6 @@ export default function BottomLine({
             <span className="flex items-center gap-1">
               <span className="inline-block w-2 h-2 rounded-full bg-white/90" />
               הוצאות ({Math.round(totalSpent).toLocaleString("he-IL")})
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-full bg-white/40" />
-              צפוי ({Math.round(expectedRecurring).toLocaleString("he-IL")})
             </span>
             <span className="flex items-center gap-1">
               <span className="inline-block w-2 h-2 rounded-full bg-white/15 border border-white/30" />

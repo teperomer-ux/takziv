@@ -2,16 +2,35 @@
 
 @theme {
   --font-heebo: "Heebo", sans-serif;
-  --color-primary: #1e3a5f;
-  --color-primary-light: #2a5a8f;
+  --color-primary: #0f766e;
+  --color-primary-light: #14b8a6;
   --color-accent: #f59e0b;
   --color-success: #10b981;
-  --color-danger: #ef4444;
+  --color-danger: #e11d48;
 }
 
 body {
   font-family: var(--font-heebo);
-  background-color: #f8fafc;
-  color: #1e293b;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Hide scrollbar but keep scroll functionality */
+.scrollbar-hide {
+  -ms-overflow-style: none;  /* IE / Edge */
+  scrollbar-width: none;     /* Firefox */
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;             /* Chrome / Safari */
+}
+
+/* Smooth transitions when toggling dark mode */
+html {
+  background-color: #f1f5f9;
+  color: #1e293b;
+  transition: background-color 0.2s, color 0.2s;
+}
+html.dark {
+  background-color: #0f172a;
+  color: #e2e8f0;
+  color-scheme: dark;
 }

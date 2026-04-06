@@ -1,16 +1,12 @@
-import { useMemo } from "react";
 import type { Transaction } from "../types";
-import { detectNewRecurring, type NewRecurringDetection } from "../utils/recurringBills";
 
 interface Props {
   transactions: Transaction[];
   averages: Map<string, number>;
-  allTransactions: Transaction[];
-  pinnedDescriptions: Set<string>;
-  onPinBill: (detection: NewRecurringDetection) => void;
+  onShowUncategorized?: () => void;
 }
 
-type InsightType = "positive" | "warning" | "info" | "new-recurring";
+type InsightType = "positive" | "warning" | "info";
 
 interface Insight {
   id: string;
@@ -23,14 +19,11 @@ interface Insight {
 export default function SmartInsights({
   transactions,
   averages,
-  allTransactions,
-  pinnedDescriptions,
-  onPinBill,
+  onShowUncategorized,
 }: Props) {
   // Aggregate current month spending per category
   const spending = new Map<string, number>();
   let uncategorizedCount = 0;
-  let miscCount = 0;
 
   for (const tx of transactions) {
     if (tx.category === "מקורות הכנסה") continue;
@@ -38,33 +31,10 @@ export default function SmartInsights({
       uncategorizedCount++;
       continue;
     }
-    if (tx.category === "שונות") {
-      miscCount++;
-    }
     spending.set(tx.category, (spending.get(tx.category) ?? 0) + tx.amount);
   }
 
-  // Detect new recurring expenses
-  const newRecurring = useMemo(
-    () => detectNewRecurring(allTransactions, pinnedDescriptions),
-    [allTransactions, pinnedDescriptions]
-  );
-
   const insights: Insight[] = [];
-
-  // ── New recurring expense detections ──────────────────────────────
-  for (const det of newRecurring) {
-    insights.push({
-      id: `new-recur-${det.description}`,
-      emoji: "💡",
-      text: `זיהינו הוצאה קבועה חדשה! העסק '${det.description}' חויב חודשיים ברצף לראשונה. האם זה מנוי חדש?`,
-      type: "new-recurring",
-      action: {
-        label: "הגדר כהוצאה קבועה",
-        onClick: () => onPinBill(det),
-      },
-    });
-  }
 
   // ── Category-based insights ───────────────────────────────────────
   for (const [cat, avg] of averages) {
@@ -95,34 +65,33 @@ export default function SmartInsights({
   }
 
   // ── Uncategorized / misc alerts ───────────────────────────────────
-  const totalUncat = uncategorizedCount + miscCount;
-  if (totalUncat >= 3) {
+  if (uncategorizedCount >= 3) {
     insights.push({
       id: "uncat",
       emoji: "💡",
-      text: `יש לך ${totalUncat} עסקאות ללא סיווג, כדאי לסווג אותן כדי לדייק את הממוצע.`,
+      text: `יש לך ${uncategorizedCount} עסקאות ללא סיווג, כדאי לסווג אותן כדי לדייק את הממוצע.`,
       type: "info",
+      action: onShowUncategorized
+        ? { label: "סווג עכשיו", onClick: onShowUncategorized }
+        : undefined,
     });
   }
 
-  // Sort: new-recurring first, then warnings, info, positive
   const order: Record<string, number> = {
-    "new-recurring": 0,
-    warning: 1,
-    info: 2,
-    positive: 3,
+    warning: 0,
+    info: 1,
+    positive: 2,
   };
   insights.sort((a, b) => order[a.type] - order[b.type]);
 
-  const top = insights.slice(0, 4);
+  const top = insights.slice(0, 5);
 
   if (top.length === 0) return null;
 
   const cardStyle: Record<InsightType, { bg: string; text: string }> = {
-    "new-recurring": { bg: "bg-violet-50 border-violet-200", text: "text-violet-800" },
-    warning: { bg: "bg-red-50 border-red-200", text: "text-red-800" },
-    info: { bg: "bg-blue-50 border-blue-200", text: "text-blue-800" },
-    positive: { bg: "bg-emerald-50 border-emerald-200", text: "text-emerald-800" },
+    warning: { bg: "bg-rose-50 dark:bg-rose-950/30 border-rose-200/60 dark:border-rose-700/40", text: "text-rose-800 dark:text-rose-300" },
+    info: { bg: "bg-blue-50 dark:bg-blue-950/30 border-blue-200/60 dark:border-blue-700/40", text: "text-blue-800 dark:text-blue-300" },
+    positive: { bg: "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200/60 dark:border-emerald-700/40", text: "text-emerald-800 dark:text-emerald-300" },
   };
 
   return (
@@ -133,23 +102,22 @@ export default function SmartInsights({
           return (
             <div
               key={insight.id}
-              className={`snap-start shrink-0 w-[280px] rounded-xl p-4 shadow-sm border ${style.bg}`}
+              className={`snap-start shrink-0 w-[280px] rounded-2xl p-4 shadow-sm border ${style.bg}`}
             >
               <div className="flex items-start gap-2">
                 <span className="text-xl leading-none mt-0.5">{insight.emoji}</span>
                 <div className="flex-1 min-w-0">
-                  {insight.type === "new-recurring" && (
-                    <span className="inline-block text-[10px] font-bold bg-violet-200 text-violet-800 px-1.5 py-0.5 rounded-full mb-1.5">
-                      חדש
-                    </span>
-                  )}
                   <p className={`text-sm leading-relaxed ${style.text}`}>
                     {insight.text}
                   </p>
                   {insight.action && (
                     <button
                       onClick={insight.action.onClick}
-                      className="mt-2.5 rounded-lg bg-violet-600 text-white px-3 py-1.5 text-xs font-medium hover:bg-violet-700 transition-colors"
+                      className={`mt-2.5 rounded-lg text-white px-3 py-1.5 text-xs font-semibold transition-colors min-h-[32px] ${
+                        insight.type === "info"
+                          ? "bg-blue-600 hover:bg-blue-700"
+                          : "bg-primary hover:bg-primary/90"
+                      }`}
                     >
                       {insight.action.label}
                     </button>

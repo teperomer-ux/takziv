@@ -7,22 +7,22 @@ export default function Login({ error, onSignIn }: Props) {
   return (
     <div
       dir="rtl"
-      className="min-h-screen flex items-center justify-center bg-gradient-to-bl from-slate-50 to-slate-100 font-heebo px-4"
+      className="min-h-screen flex items-center justify-center bg-gradient-to-bl from-teal-50 to-slate-100 dark:from-slate-950 dark:to-slate-900 font-heebo px-5"
     >
       <div className="w-full max-w-sm text-center">
         {/* Logo / App name */}
         <div className="mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary text-white text-2xl font-extrabold shadow-lg mb-4">
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-bl from-teal-600 to-teal-700 text-white text-2xl font-extrabold shadow-lg mb-4">
             ת
           </div>
-          <h1 className="text-2xl font-bold text-slate-800">תקציב</h1>
+          <h1 className="text-2xl font-bold text-slate-800 dark:text-white">תקציב</h1>
           <p className="text-sm text-slate-500 mt-1">
             ברוכים הבאים למערכת ניהול התקציב
           </p>
         </div>
 
         {/* Sign-in card */}
-        <div className="rounded-2xl bg-white p-6 shadow-lg border border-slate-100">
+        <div className="rounded-2xl bg-white dark:bg-slate-900 p-6 shadow-lg border border-slate-200/60 dark:border-slate-700/60">
           <p className="text-sm text-slate-600 mb-5">
             התחברו כדי לגשת לנתונים שלכם
           </p>
@@ -32,9 +32,9 @@ export default function Login({ error, onSignIn }: Props) {
             className="
               w-full flex items-center justify-center gap-3
               rounded-xl border border-slate-200 bg-white
-              px-4 py-3 text-sm font-medium text-slate-700
+              px-4 py-3.5 text-sm font-semibold text-slate-700
               shadow-sm hover:bg-slate-50 hover:shadow
-              active:scale-[0.98] transition-all
+              active:scale-[0.98] transition-all min-h-[48px]
             "
           >
             {/* Google "G" logo */}

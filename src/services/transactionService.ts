@@ -20,30 +20,48 @@ const colRef = collection(db, COLLECTION);
 
 // ─── Converters ─────────────────────────────────────────────────────────────
 
+/** Derive billingMonth/billingYear from the date if not explicitly set. */
+function deriveBilling(tx: { date: string; billingMonth?: number; billingYear?: number }) {
+  if (tx.billingMonth && tx.billingYear) return { billingMonth: tx.billingMonth, billingYear: tx.billingYear };
+  // Fallback: parse from date string "YYYY-MM-DD"
+  const [y, m] = tx.date.split("-").map(Number);
+  return { billingMonth: m || 1, billingYear: y || new Date().getFullYear() };
+}
+
 function docToTransaction(
   id: string,
   data: Record<string, unknown>
 ): Transaction {
   const ts = data.date as Timestamp;
+  const dateStr = ts?.toDate?.().toISOString().split("T")[0] ?? new Date().toISOString().split("T")[0];
+  const [fallbackY, fallbackM] = dateStr.split("-").map(Number);
   return {
     id,
-    date: ts.toDate().toISOString().split("T")[0],
+    date: dateStr,
     description: (data.description as string) ?? "",
     amount: (data.amount as number) ?? 0,
     category: (data.category as string) ?? "",
     subCategory: (data.subCategory as string) ?? "",
     status: (data.status as Transaction["status"]) ?? "draft",
+    billingMonth: (data.billingMonth as number) ?? fallbackM,
+    billingYear: (data.billingYear as number) ?? fallbackY,
   };
 }
 
 function toFirestoreData(tx: Omit<Transaction, "id">) {
+  const parsed = new Date(tx.date);
+  // Guard against Invalid Date — fall back to today rather than crashing the batch
+  const safeDate = isNaN(parsed.getTime()) ? new Date() : parsed;
+  const billing = deriveBilling(tx);
   return {
-    date: Timestamp.fromDate(new Date(tx.date)),
+    date: Timestamp.fromDate(safeDate),
     description: tx.description,
     amount: tx.amount,
-    category: tx.category,
-    subCategory: tx.subCategory,
+    category: tx.category ?? "",
+    subCategory: tx.subCategory ?? "",
     status: tx.status,
+    billingMonth: billing.billingMonth,
+    billingYear: billing.billingYear,
   };
 }
 
@@ -81,7 +99,8 @@ export async function updateTransaction(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const updates: Record<string, any> = { ...data };
   if (data.date) {
-    updates.date = Timestamp.fromDate(new Date(data.date));
+    const parsed = new Date(data.date);
+    updates.date = Timestamp.fromDate(isNaN(parsed.getTime()) ? new Date() : parsed);
   }
   await updateDoc(ref, updates);
 }
@@ -91,31 +110,66 @@ export async function deleteTransaction(id: string): Promise<void> {
   await deleteDoc(doc(db, COLLECTION, id));
 }
 
-/** Delete all transactions for a given month (batch). */
+/**
+ * Delete all transactions for a given billing month (batch).
+ *
+ * Strategy: fetch EVERY doc, convert with docToTransaction (which applies the
+ * billingMonth/billingYear fallback for legacy docs missing those fields),
+ * then delete the ones that match.  This guarantees we catch documents whose
+ * billingMonth was never written to Firestore but is derived from the date.
+ */
 export async function deleteMonthTransactions(
   year: number,
-  month: number
+  month: number,
 ): Promise<number> {
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
+  console.log(`🔥 DELETE START: billingMonth=${month}, billingYear=${year}`);
 
-  const q = query(
-    colRef,
-    where("date", ">=", Timestamp.fromDate(start)),
-    where("date", "<", Timestamp.fromDate(end))
-  );
+  // 1. Fetch every document in the collection
+  const allSnapshot = await getDocs(query(colRef, orderBy("date", "desc")));
 
-  const snapshot = await getDocs(q);
-  if (snapshot.empty) return 0;
+  if (allSnapshot.empty) {
+    console.log("🔥 DELETE: collection is empty, nothing to delete");
+    return 0;
+  }
 
-  for (let i = 0; i < snapshot.docs.length; i += 500) {
-    const chunk = snapshot.docs.slice(i, i + 500);
+  // 2. Convert to Transaction objects (applies billingMonth fallback)
+  //    and collect refs whose billingMonth/billingYear match
+  const refsToDelete: ReturnType<typeof doc>[] = [];
+
+  for (const d of allSnapshot.docs) {
+    const tx = docToTransaction(d.id, d.data());
+    if (tx.billingMonth === month && tx.billingYear === year) {
+      refsToDelete.push(d.ref);
+    }
+  }
+
+  console.log(`🔥 DELETE: found ${refsToDelete.length} docs matching ${year}-${String(month).padStart(2, "0")} out of ${allSnapshot.size} total`);
+
+  if (refsToDelete.length === 0) return 0;
+
+  // 3. Batch-delete in chunks of 500
+  for (let i = 0; i < refsToDelete.length; i += 500) {
+    const chunk = refsToDelete.slice(i, i + 500);
     const batch = writeBatch(db);
-    for (const d of chunk) batch.delete(d.ref);
+    for (const ref of chunk) batch.delete(ref);
     await batch.commit();
   }
 
-  return snapshot.docs.length;
+  console.log(`🔥 FIRESTORE DELETED: ${refsToDelete.length} documents for ${month}/${year}`);
+
+  // 4. Verify: re-fetch and confirm the bucket is empty
+  const verifySnapshot = await getDocs(query(colRef, orderBy("date", "desc")));
+  const remaining = verifySnapshot.docs
+    .map((d) => docToTransaction(d.id, d.data()))
+    .filter((tx) => tx.billingMonth === month && tx.billingYear === year);
+
+  if (remaining.length > 0) {
+    console.error(`🔥 VERIFY FAILED: ${remaining.length} docs STILL match ${month}/${year} after deletion!`);
+  } else {
+    console.log(`🔥 VERIFY OK: 0 docs remain for ${month}/${year}`);
+  }
+
+  return refsToDelete.length;
 }
 
 // ─── Read operations ────────────────────────────────────────────────────────
@@ -127,18 +181,15 @@ export async function getAllTransactions(): Promise<Transaction[]> {
   return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
 }
 
-/** Fetch all transactions for a given month (one-shot). */
+/** Fetch all transactions for a given billing month (one-shot). */
 export async function getTransactionsByMonth(
   year: number,
   month: number
 ): Promise<Transaction[]> {
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
-
   const q = query(
     colRef,
-    where("date", ">=", Timestamp.fromDate(start)),
-    where("date", "<", Timestamp.fromDate(end)),
+    where("billingYear", "==", year),
+    where("billingMonth", "==", month),
     orderBy("date", "desc")
   );
 
@@ -159,13 +210,10 @@ export function onTransactionsSnapshot(
   callback: (txs: Transaction[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  const start = new Date(year, month - 1, 1);
-  const end = new Date(year, month, 1);
-
   const q = query(
     colRef,
-    where("date", ">=", Timestamp.fromDate(start)),
-    where("date", "<", Timestamp.fromDate(end)),
+    where("billingYear", "==", year),
+    where("billingMonth", "==", month),
     orderBy("date", "desc")
   );
 

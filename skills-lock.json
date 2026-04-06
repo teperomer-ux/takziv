@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "israeli-smart-saver": {
+      "source": "skills-il/tax-and-finance",
+      "sourceType": "github",
+      "computedHash": "1bd41b33e10188d84cf66d330de5617db3be83a8d4ae528d8b75dba9b75bc8ea"
+    }
+  }
+}

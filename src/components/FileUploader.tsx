@@ -5,6 +5,7 @@ import { useCategories } from "../hooks/useCategories";
 import { suggestCategory, type UserMapping, type MatchSource } from "../utils/classifier";
 import { bulkSaveTransactions } from "../services/transactionService";
 import { getLearnedMappings, bulkSaveMappings } from "../services/mappingService";
+import { auth } from "../lib/firebase";
 import { calculateFileHash } from "../utils/fileHash";
 import { checkFileHash, saveFileHash } from "../services/uploadedFilesService";
 import type { Transaction } from "../types";
@@ -29,18 +30,67 @@ function tempId() {
 }
 
 /** Try to parse a DD/MM/YYYY or YYYY-MM-DD string into YYYY-MM-DD */
-function normalizeDate(raw: string): string {
-  if (!raw) return new Date().toISOString().split("T")[0];
-
-  // DD/MM/YYYY
-  const slashMatch = raw.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/);
-  if (slashMatch) {
-    const [, d, m, y] = slashMatch;
-    const year = y.length === 2 ? `20${y}` : y;
-    return `${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+function normalizeDate(raw: unknown): string {
+  // Handle JS Date objects (xlsx may return these for date cells)
+  if (raw instanceof Date && !isNaN(raw.getTime())) {
+    const y = raw.getFullYear();
+    const m = String(raw.getMonth() + 1).padStart(2, "0");
+    const d = String(raw.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
   }
+
+  const str = String(raw ?? "").trim();
+  if (!str) return new Date().toISOString().split("T")[0];
+
   // Already YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+
+  // DD/MM/YYYY, DD/MM/YY, DD-MM-YYYY, DD.MM.YYYY
+  const slashMatch = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/);
+  if (slashMatch) {
+    let [, a, b, y] = slashMatch;
+    const year = y.length === 2 ? `20${y}` : y;
+    let day = parseInt(a, 10);
+    let month = parseInt(b, 10);
+
+    // Disambiguate DD/MM vs MM/DD:
+    // If first part > 12, it must be the day (DD/MM format)
+    // If second part > 12, it must be the day (MM/DD format)
+    // Otherwise assume DD/MM (Israeli convention)
+    if (day > 12 && month <= 12) {
+      // Already correct: DD/MM
+    } else if (month > 12 && day <= 12) {
+      // Swap: it's actually MM/DD
+      [day, month] = [month, day];
+    }
+    // else: both <= 12, assume DD/MM (Israeli default)
+
+    // Validate ranges
+    if (month < 1 || month > 12) month = 1;
+    if (day < 1 || day > 31) day = 1;
+
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  // Excel serial number (numeric string like "46036")
+  if (/^\d{4,5}$/.test(str)) {
+    const serial = parseInt(str, 10);
+    // Excel epoch: Jan 1 1900 = serial 1, but JS Date epoch differs
+    // Excel has a leap-year bug for 1900, so subtract 2 for serials > 59
+    const excelEpoch = new Date(1899, 11, 30); // Dec 30 1899
+    const ms = excelEpoch.getTime() + serial * 86400000;
+    const d = new Date(ms);
+    if (!isNaN(d.getTime())) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    }
+  }
+
+  // Last resort: try native Date parsing
+  const fallback = new Date(str);
+  if (!isNaN(fallback.getTime())) {
+    return fallback.toISOString().split("T")[0];
+  }
+
   return new Date().toISOString().split("T")[0];
 }
 
@@ -51,7 +101,7 @@ function parseAmount(raw: unknown): number {
 }
 
 function buildRow(
-  date: string,
+  date: unknown,
   description: string,
   amount: number,
   userMappings?: UserMapping[]
@@ -73,30 +123,61 @@ function buildRow(
     category,
     subCategory,
     status: "draft",
+    // Placeholder — real billing month/year is stamped in handleSave
+    billingMonth: 0,
+    billingYear: 0,
   };
 }
 
 // ─── Excel / CSV parser ─────────────────────────────────────────────────────
 
-/** Known header labels → semantic role. Longest first for best matching. */
-const HEADER_DATE = ["תאריך עסקה", "תאריך", "date", "Date"];
-const HEADER_DESC = ["שם בית העסק", "בית עסק", "תיאור", "description", "Description"];
-const HEADER_AMT  = ["סכום חיוב", "סכום עסקה", "סכום", "amount", "Amount"];
+/** Known header labels → semantic role. Longest/most-specific first. */
+const HEADER_DATE = [
+  "תאריך העסקה", "תאריך עסקה", "תאריך חיוב", "תאריך",
+  "date", "Date",
+];
+const HEADER_DESC = [
+  "שם בית העסק", "שם בית עסק", "בית העסק", "בית עסק",
+  "תיאור", "description", "Description",
+];
+const HEADER_AMT = [
+  "סכום החיוב בש\"ח", "סכום החיוב", "סכום חיוב",
+  "סכום בש\"ח", "סכום עסקה", "סכום",
+  "amount", "Amount",
+];
 
-/** Find the column index for a known header label inside a row of cells. */
+/**
+ * Find the column index for a known header label inside a row of cells.
+ * Uses normalized comparison: trims whitespace, strips \" and ״,
+ * and falls back to substring matching for merged/long headers.
+ */
 function findCol(row: unknown[], labels: string[]): number {
+  // Normalize helper: trim, collapse whitespace, strip quotation marks
+  const norm = (s: string) =>
+    s.trim().replace(/\s+/g, " ").replace(/["״]/g, '"');
+
+  const cells = row.map((c) => (c != null ? norm(String(c)) : ""));
+
   for (const label of labels) {
-    const idx = row.findIndex(
-      (cell) => cell != null && String(cell).trim() === label
-    );
-    if (idx >= 0) return idx;
+    const nl = norm(label);
+    // Exact match first
+    const exact = cells.findIndex((c) => c === nl);
+    if (exact >= 0) return exact;
+  }
+  // Substring / contains fallback (cell contains the label)
+  for (const label of labels) {
+    const nl = norm(label);
+    const partial = cells.findIndex((c) => c.length > 0 && c.includes(nl));
+    if (partial >= 0) return partial;
   }
   return -1;
 }
 
 async function parseExcel(file: File, userMappings?: UserMapping[]): Promise<PreviewRow[]> {
   const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: "array", raw: false });
+  // cellDates: true → date cells become JS Date objects (not serial numbers)
+  // raw: true → numbers stay as numbers, text stays as text (no locale formatting)
+  const workbook = XLSX.read(buffer, { type: "array", cellDates: true, raw: true });
   const results: PreviewRow[] = [];
 
   // Iterate ALL sheets (domestic / foreign may be separate sheets)
@@ -105,19 +186,38 @@ async function parseExcel(file: File, userMappings?: UserMapping[]): Promise<Pre
       const sheet = workbook.Sheets[sheetName];
       if (!sheet) continue;
 
-      // Convert to a 2D array so we can scan for the header row dynamically
-      const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1 });
-      if (!rows || rows.length === 0) continue;
+      // ── Step 1: Parse as raw 2D array ─────────────────────────────
+      const rows = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+        header: 1,
+        defval: "",
+        raw: true,
+        dateNF: "dd/mm/yyyy",
+      });
+      if (!rows || rows.length === 0) {
+        console.warn(`[parseExcel] sheet "${sheetName}": empty or unreadable`);
+        continue;
+      }
 
-      // ── Find the header row ─────────────────────────────────────────
+      console.info(`[parseExcel] sheet "${sheetName}": ${rows.length} raw rows`);
+
+      // ── Step 2: Find the header row (scan first 20 rows) ──────────
       let headerIdx = -1;
       let dateCol = -1;
       let descCol = -1;
       let amtCol = -1;
+      const scanLimit = Math.min(rows.length, 20);
 
-      for (let i = 0; i < rows.length; i++) {
+      for (let i = 0; i < scanLimit; i++) {
         const row = rows[i];
-        if (!row || !Array.isArray(row) || row.length < 2) continue;
+        if (!row || !Array.isArray(row)) continue;
+
+        // Log each scanned row for debugging
+        const preview = row.map((c) => (c instanceof Date ? `[Date]` : String(c ?? "").substring(0, 30)));
+        console.log(`[parseExcel] row ${i}:`, preview.join(" | "));
+
+        // Skip rows with fewer than 2 non-empty cells
+        const nonEmpty = row.filter((c) => c != null && String(c).trim() !== "");
+        if (nonEmpty.length < 2) continue;
 
         const dc = findCol(row, HEADER_DATE);
         const nc = findCol(row, HEADER_DESC);
@@ -127,70 +227,67 @@ async function parseExcel(file: File, userMappings?: UserMapping[]): Promise<Pre
           dateCol = dc;
           descCol = nc;
           amtCol = findCol(row, HEADER_AMT);
+          console.info(`[parseExcel] ✓ header found at row ${i}: dateCol=${dc}, descCol=${nc}, amtCol=${amtCol}`);
           break;
         }
       }
 
-      // If no header found, fall back to sheet_to_json with named keys
       if (headerIdx < 0) {
-        const namedRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
-        for (const row of namedRows) {
-          try {
-            const date = String(
-              row["תאריך"] ?? row["תאריך עסקה"] ?? row["date"] ?? row["Date"] ?? ""
-            );
-            const rawDesc = String(
-              row["שם בית העסק"] ?? row["בית עסק"] ?? row["תיאור"] ?? row["description"] ?? row["Description"] ?? ""
-            );
-            const amt = row["סכום"] ?? row["סכום חיוב"] ?? row["סכום עסקה"] ?? row["amount"] ?? row["Amount"] ?? 0;
-            const desc = cleanBusinessName(rawDesc);
-            if (!desc && parseAmount(amt) === 0) continue;
-            results.push(buildRow(date, desc, parseAmount(amt), userMappings));
-          } catch {
-            continue;
-          }
-        }
+        console.warn(`[parseExcel] sheet "${sheetName}": no header row found in first ${scanLimit} rows`);
         continue;
       }
 
-      // ── Extract data rows below the header ──────────────────────────
+      // ── Step 3: Extract data rows below the header ────────────────
+      let extracted = 0;
+      let skipped = 0;
+
       for (let i = headerIdx + 1; i < rows.length; i++) {
         try {
           const row = rows[i];
-          if (!row || !Array.isArray(row) || row.length < 2) continue;
+          if (!row || !Array.isArray(row)) continue;
 
-          const rawDate = row[dateCol] != null ? String(row[dateCol]).trim() : "";
-          const rawDesc = row[descCol] != null ? String(row[descCol]).trim() : "";
+          // Get raw cell values by mapped column index
+          const rawDateCell = dateCol >= 0 && dateCol < row.length ? row[dateCol] : "";
+          const rawDescCell = descCol >= 0 && descCol < row.length ? row[descCol] : "";
+          const rawAmtCell = amtCol >= 0 && amtCol < row.length ? row[amtCol] : 0;
 
-          // Skip summary / empty rows
-          if (!rawDate && !rawDesc) continue;
-          if (rawDate.includes("סך הכל") || rawDesc.includes("סך הכל")) continue;
-          if (rawDate.includes('סה"כ') || rawDesc.includes('סה"כ')) continue;
+          const rawDesc = rawDescCell != null ? String(rawDescCell).trim() : "";
+          const rawDateStr = rawDateCell instanceof Date ? "" : String(rawDateCell ?? "").trim();
 
-          // Parse amount (handle minus for credits, strip currency symbols)
-          const rawAmt = amtCol >= 0 && row[amtCol] != null ? row[amtCol] : 0;
-          const amount = parseAmount(rawAmt);
-          if (amount === 0 && !rawDesc) continue;
+          // Skip completely empty rows
+          if (!rawDateStr && !(rawDateCell instanceof Date) && !rawDesc) continue;
+
+          // Skip summary / total / metadata rows
+          const rowText = rawDateStr + " " + rawDesc;
+          if (/סה"כ|סה״כ|סהכ|סך הכל|לתאריך|TOTAL/i.test(rowText)) {
+            skipped++;
+            continue;
+          }
+
+          // Parse amount
+          const amount = parseAmount(rawAmtCell);
+          if (amount === 0 && !rawDesc) { skipped++; continue; }
 
           // Clean the description
           const desc = cleanBusinessName(rawDesc);
-          if (!desc) continue;
+          if (!desc) { skipped++; continue; }
 
-          // Normalize date: handle DD-MM-YYYY, DD/MM/YYYY, etc.
-          const normalizedDate = rawDate.replace(/-/g, "/");
-
-          results.push(buildRow(normalizedDate, desc, amount, userMappings));
+          // Build the transaction row — normalizeDate handles Date objects, strings, serials
+          results.push(buildRow(rawDateCell, desc, amount, userMappings));
+          extracted++;
         } catch {
+          skipped++;
           continue;
         }
       }
 
-      console.info(`[parseExcel] sheet "${sheetName}": header at row ${headerIdx}, extracted ${results.length} transactions so far`);
+      console.info(`[parseExcel] sheet "${sheetName}": header at row ${headerIdx}, extracted ${extracted}, skipped ${skipped}`);
     } catch (sheetErr) {
       console.warn(`[parseExcel] failed to process sheet "${sheetName}":`, sheetErr);
     }
   }
 
+  console.info(`[parseExcel] total: ${results.length} transactions from ${workbook.SheetNames.length} sheet(s)`);
   return results;
 }
 
@@ -240,6 +337,9 @@ function isSummaryRow(row: string): boolean {
 
 const DATE_RE = /\b(\d{2}\/\d{2}\/\d{2,4})\b/;
 const AMOUNT_RE_G = /-?\d{1,3}(?:,\d{3})*(?:\.\d{2})/g;
+
+/** Words that precede a number we should ignore (discounts, benefits, etc.) */
+const DISCOUNT_PREFIX_RE = /(?:הנחה|בסך|הטבה|זיכוי של|חיסכון)\s*$/;
 
 // ─── String-based row grouping (bulletproof) ────────────────────────────────
 
@@ -517,8 +617,18 @@ async function parsePdf(file: File, userMappings?: UserMapping[]): Promise<Previ
       const amounts = fullRow.match(AMOUNT_RE_G);
       if (!amounts || amounts.length === 0) continue;
 
-      // ILS charge = last amount on the row (leftmost column in RTL)
-      const ilsToken = amounts[amounts.length - 1];
+      // Filter out amounts preceded by discount-related keywords.
+      // Walk matches from last to first (last = leftmost column in RTL = ILS charge).
+      // The first non-discount match from the end is our real charge.
+      let ilsToken: string | null = null;
+      for (let ai = amounts.length - 1; ai >= 0; ai--) {
+        const idx = fullRow.lastIndexOf(amounts[ai]);
+        const textBefore = idx > 0 ? fullRow.substring(Math.max(0, idx - 30), idx) : "";
+        if (DISCOUNT_PREFIX_RE.test(textBefore)) continue;
+        ilsToken = amounts[ai];
+        break;
+      }
+      if (!ilsToken) ilsToken = amounts[amounts.length - 1]; // fallback
       const ilsAmount = parseAmount(ilsToken);
       if (ilsAmount === 0) continue;
 
@@ -548,7 +658,15 @@ async function parsePdf(file: File, userMappings?: UserMapping[]): Promise<Previ
 
 const ADD_NEW = "__add_new__";
 
-export default function FileUploader() {
+interface FileUploaderProps {
+  onDone?: () => void;
+  /** The billing cycle month (1-12) currently active in the UI. */
+  billingMonth: number;
+  /** The billing cycle year currently active in the UI. */
+  billingYear: number;
+}
+
+export default function FileUploader({ onDone, billingMonth, billingYear }: FileUploaderProps) {
   const { categories, categoryNames, addCategory, addSubCategory } = useCategories();
   const [rows, setRows] = useState<PreviewRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -602,7 +720,9 @@ export default function FileUploader() {
   // ── Load learned mappings on mount ────────────────────────────────
 
   useEffect(() => {
-    getLearnedMappings()
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    getLearnedMappings(uid)
       .then((m) => {
         mappingsRef.current = m;
         console.info(`[FileUploader] loaded ${m.length} learned mappings`);
@@ -756,40 +876,85 @@ export default function FileUploader() {
       const toSave = rows.map(
         ({ _tempId: _, _autoMatched: __, _matchSource: ___, ...rest }) => ({
           ...rest,
+          // Ensure every field is present (Firestore rejects undefined)
+          date: rest.date,
+          description: rest.description ?? "",
+          amount: rest.amount ?? 0,
+          category: rest.category ?? "",
+          subCategory: rest.subCategory ?? "",
           status: "confirmed" as const,
+          // ── Billing Month Binding ─────────────────────────────────
+          // Stamp every transaction with the currently active billing cycle,
+          // regardless of the raw purchase date.
+          billingMonth,
+          billingYear,
         })
       );
-      await bulkSaveTransactions(toSave);
 
-      // Learn from every row that has a category assigned
-      const mappingsToLearn = rows
-        .filter((r) => r.category && r.description.trim())
-        .map((r) => ({
-          description: r.description.trim(),
-          category: r.category,
-          subCategory: r.subCategory,
-        }));
-      if (mappingsToLearn.length > 0) {
-        await bulkSaveMappings(mappingsToLearn);
-        // Update local cache so subsequent parses use new mappings immediately
-        const fresh = await getLearnedMappings();
-        mappingsRef.current = fresh;
-        console.info(`[FileUploader] learned ${mappingsToLearn.length} new mappings`);
+      // Validate every date before saving — log any that would fail
+      for (const item of toSave) {
+        const d = new Date(item.date);
+        if (isNaN(d.getTime())) {
+          console.error("[FileUploader] INVALID DATE will fail in Firestore:", item.date, item.description);
+        }
       }
 
-      // Save file fingerprint so future uploads detect duplicates
-      if (pendingHashRef.current && pendingFileRef.current) {
-        await saveFileHash(pendingHashRef.current, pendingFileRef.current.name).catch((err) =>
-          console.warn("[FileUploader] failed to save file hash:", err)
-        );
+      console.info(`[FileUploader] saving ${toSave.length} transactions (NO month filter)…`);
+      console.log("[FileUploader] ALL items being saved:", JSON.stringify(toSave.map((t) => ({
+        date: t.date,
+        desc: t.description,
+        amount: t.amount,
+      })), null, 2));
+
+      if (toSave.length === 0) {
+        console.error("[FileUploader] BUG: toSave is empty — nothing to save!");
+        setError("לא נמצאו עסקאות לשמירה.");
+        return;
+      }
+
+      await bulkSaveTransactions(toSave);
+      console.info(`[FileUploader] ✓ saved ${toSave.length} transactions to Firestore (billing: ${billingYear}-${String(billingMonth).padStart(2, "0")})`);
+
+      // ── Mark success immediately — post-save tasks must not block ────
+      setSaved(true);
+      setRows([]);
+
+      // Learn mappings & save hash in background (failures are non-fatal)
+      try {
+        const mappingsToLearn = rows
+          .filter((r) => r.category && r.description.trim())
+          .map((r) => ({
+            description: r.description.trim(),
+            category: r.category,
+            subCategory: r.subCategory,
+          }));
+        const uid = auth.currentUser?.uid;
+        if (mappingsToLearn.length > 0 && uid) {
+          await bulkSaveMappings(uid, mappingsToLearn);
+          const fresh = await getLearnedMappings(uid);
+          mappingsRef.current = fresh;
+          console.info(`[FileUploader] learned ${mappingsToLearn.length} new mappings`);
+        }
+      } catch (learnErr) {
+        console.warn("[FileUploader] failed to learn mappings (non-fatal):", learnErr);
+      }
+
+      try {
+        if (pendingHashRef.current && pendingFileRef.current) {
+          await saveFileHash(pendingHashRef.current, pendingFileRef.current.name);
+        }
+      } catch (hashErr) {
+        console.warn("[FileUploader] failed to save file hash (non-fatal):", hashErr);
       }
       pendingFileRef.current = null;
       pendingHashRef.current = "";
 
-      setSaved(true);
-      setRows([]);
-    } catch {
-      setError("שגיאה בשמירה ל-Firebase. נסו שוב.");
+      // Close the modal — snapshot listener will pick up the new docs
+      onDone?.();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[FileUploader] save failed:", msg, err);
+      setError(`שגיאה בשמירה: ${msg}`);
     } finally {
       setSaving(false);
     }

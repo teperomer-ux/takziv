@@ -1,164 +1,190 @@
 import type { Transaction } from "../types";
 
-export interface RecurringBill {
+// ── Types ────────────────────────────────────────────────────────────
+
+export interface RecurringCharge {
   description: string;
-  avgAmount: number;
-  typicalDay: number;
-  monthCount: number;
+  amountM: number;   // amount in current month (M)
+  amountM1: number;  // amount in previous month (M-1)
 }
 
-export interface NewRecurringDetection {
+export interface RecurringAlert {
+  kind: "amount-changed" | "stopped" | "new";
   description: string;
-  amount: number;
-  typicalDay: number;
-  months: [string, string]; // the two consecutive month keys
+  /** Only present for "amount-changed" */
+  previousAmount?: number;
+  currentAmount?: number;
+  diff?: number;
 }
 
-/** Check if two YYYY-MM strings are consecutive months. */
-function areConsecutiveMonths(a: string, b: string): boolean {
-  const [y1, m1] = a.split("-").map(Number);
-  const [y2, m2] = b.split("-").map(Number);
-  // a is the month before b
-  if (y1 === y2 && m2 === m1 + 1) return true;
-  // Dec → Jan cross-year
-  if (y2 === y1 + 1 && m1 === 12 && m2 === 1) return true;
-  return false;
+export interface RecurringResult {
+  charges: RecurringCharge[];
+  alerts: RecurringAlert[];
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+const MAX_VARIANCE = 0.05; // 5 %
+
+/**
+ * Descriptions (partial matches) that should never be treated as recurring.
+ * e.g. prepaid wallet reloads, top-up apps whose monthly sums coincidentally match.
+ */
+const IGNORED_RECURRING_NAMES = ["חבר", "UPAPP"];
+
+/** Step one month back, handling year wrap. */
+function prevMonth(y: number, m: number): [number, number] {
+  return m === 1 ? [y - 1, 12] : [y, m - 1];
+}
+
+function billingKey(y: number, m: number): string {
+  return `${y}-${String(m).padStart(2, "0")}`;
 }
 
 /**
- * Detect businesses that appeared for exactly 2 consecutive months
- * for the first time ever — potential new subscriptions.
+ * Are two positive amounts within 5% of each other?
+ * Divides by the SMALLER value so the percentage is always
+ * calculated against the stricter baseline.
  */
-export function detectNewRecurring(
-  allTransactions: Transaction[],
-  pinnedDescriptions: Set<string>
-): NewRecurringDetection[] {
-  const byDesc = new Map<
-    string,
-    { months: Map<string, { total: number; day: number }>; count: number }
-  >();
+function isPairRecurring(a: number, b: number): boolean {
+  if (a <= 0 || b <= 0) return false;
+  return Math.abs(a - b) / Math.min(a, b) <= MAX_VARIANCE;
+}
 
-  for (const tx of allTransactions) {
+interface MonthBucket {
+  sum: number;
+  count: number;
+}
+
+/**
+ * Group transactions by normalized description into per-billing-month buckets.
+ * Each bucket tracks the total sum AND the number of individual transactions.
+ * Uses billingYear / billingMonth — never the raw date string.
+ * Skips income rows and blank descriptions.
+ */
+function groupByBillingMonth(
+  txs: Transaction[],
+): Map<string, Map<string, MonthBucket>> {
+  const map = new Map<string, Map<string, MonthBucket>>();
+
+  for (const tx of txs) {
     if (tx.category === "מקורות הכנסה") continue;
-    const desc = tx.description.trim();
+    const desc = tx.description.trim().replace(/\s+/g, " ");
     if (!desc) continue;
 
-    let entry = byDesc.get(desc);
-    if (!entry) {
-      entry = { months: new Map(), count: 0 };
-      byDesc.set(desc, entry);
+    const key = `${tx.billingYear}-${String(tx.billingMonth).padStart(2, "0")}`;
+
+    let months = map.get(desc);
+    if (!months) {
+      months = new Map();
+      map.set(desc, months);
     }
-
-    const monthKey = tx.date.slice(0, 7);
-    const existing = entry.months.get(monthKey);
-    const day = parseInt(tx.date.slice(8, 10), 10);
-    if (existing) {
-      existing.total += tx.amount;
-    } else {
-      entry.months.set(monthKey, { total: tx.amount, day });
-    }
-    entry.count++;
-  }
-
-  const results: NewRecurringDetection[] = [];
-
-  for (const [desc, data] of byDesc) {
-    // Exactly 2 distinct months, exactly 2 transactions
-    if (data.months.size !== 2 || data.count !== 2) continue;
-    // Skip already-pinned bills
-    if (pinnedDescriptions.has(desc)) continue;
-
-    const keys = [...data.months.keys()].sort();
-    if (!areConsecutiveMonths(keys[0], keys[1])) continue;
-
-    const vals = [...data.months.values()];
-
-    // Amounts must be within 20% of each other to count as recurring
-    const minAmt = Math.min(Math.abs(vals[0].total), Math.abs(vals[1].total));
-    if (minAmt > 0) {
-      const diffPct = Math.abs(vals[0].total - vals[1].total) / minAmt;
-      if (diffPct > 0.20) continue;
-    }
-
-    const avgAmount = (vals[0].total + vals[1].total) / 2;
-    const typicalDay = Math.round((vals[0].day + vals[1].day) / 2);
-
-    results.push({
-      description: desc,
-      amount: avgAmount,
-      typicalDay,
-      months: [keys[0], keys[1]],
+    const prev = months.get(key);
+    months.set(key, {
+      sum: (prev?.sum ?? 0) + tx.amount,
+      count: (prev?.count ?? 0) + 1,
     });
   }
 
-  return results;
+  return map;
 }
 
+// ── Public API ───────────────────────────────────────────────────────
+
 /**
- * Detect recurring bills from historical transactions.
- * Returns bills expected in the remaining days of the given month.
+ * Calculate the recurring charges list and alerts for month M.
+ *
+ * Pipeline (all based on billingMonth/billingYear):
+ *
+ * 1. For each description, look up amounts in M, M-1, M-2.
+ * 2. Compute two booleans:
+ *    - recurring_M_M1:  exists in M AND M-1 AND isPairRecurring(M, M-1)
+ *    - recurring_M1_M2: exists in M-1 AND M-2 AND isPairRecurring(M-1, M-2)
+ * 3. Map to output:
+ *    - charges[]:        recurring_M_M1 === true
+ *    - alert "new":      recurring_M_M1 === true  AND recurring_M1_M2 === false
+ *    - alert "stopped":  recurring_M_M1 === false AND recurring_M1_M2 === true
+ *    - alert "changed":  recurring_M_M1 === true  AND recurring_M1_M2 === true AND amountM !== amountM1
  */
-export function computeUpcomingBills(
+export function calculateRecurringAndAlerts(
   allTransactions: Transaction[],
   year: number,
-  month: number
-): RecurringBill[] {
-  const byDesc = new Map<
-    string,
-    { months: Set<string>; totalAmount: number; days: number[]; count: number }
-  >();
+  month: number,
+): RecurringResult {
+  // Filter out blacklisted descriptions before any grouping/summing
+  const filtered = allTransactions.filter(
+    (tx) => !IGNORED_RECURRING_NAMES.some((bl) => tx.description.includes(bl)),
+  );
 
-  for (const tx of allTransactions) {
-    if (tx.category === "מקורות הכנסה") continue;
-    if (!tx.description.trim()) continue;
+  const byDesc = groupByBillingMonth(filtered);
 
-    const key = tx.description.trim();
-    let entry = byDesc.get(key);
-    if (!entry) {
-      entry = { months: new Set(), totalAmount: 0, days: [], count: 0 };
-      byDesc.set(key, entry);
+  const keyM = billingKey(year, month);
+  const [y1, m1] = prevMonth(year, month);
+  const keyM1 = billingKey(y1, m1);
+  const [y2, m2] = prevMonth(y1, m1);
+  const keyM2 = billingKey(y2, m2);
+
+  const charges: RecurringCharge[] = [];
+  const alerts: RecurringAlert[] = [];
+
+  for (const [desc, months] of byDesc) {
+    const bucketM  = months.get(keyM);
+    const bucketM1 = months.get(keyM1);
+    const bucketM2 = months.get(keyM2);
+
+    const amountM  = bucketM?.sum;
+    const amountM1 = bucketM1?.sum;
+    const amountM2 = bucketM2?.sum;
+
+    // ── Frequency filter: real recurring bills appear exactly once ─
+    // If a description has multiple transactions in M or M-1, it's a
+    // variable expense (wallet reload, groceries, etc.), not a bill.
+    const multiM  = (bucketM?.count ?? 0) > 1;
+    const multiM1 = (bucketM1?.count ?? 0) > 1;
+
+    // ── Two booleans — the entire decision tree ──────────────────
+    const recurring_M_M1 =
+      !multiM && !multiM1 &&
+      amountM != null && amountM1 != null && isPairRecurring(amountM, amountM1);
+
+    const multiM2 = (bucketM2?.count ?? 0) > 1;
+    const recurring_M1_M2 =
+      !multiM1 && !multiM2 &&
+      amountM1 != null && amountM2 != null && isPairRecurring(amountM1, amountM2);
+
+    // ── Map to output arrays ─────────────────────────────────────
+
+    // If NOT recurring this month, it cannot be in charges / new / changed
+    if (!recurring_M_M1) {
+      // But it CAN be "stopped" if it was recurring last month
+      if (recurring_M1_M2) {
+        alerts.push({ kind: "stopped", description: desc });
+      }
+      continue; // nothing else to do for this description
     }
 
-    const monthKey = tx.date.slice(0, 7);
-    entry.months.add(monthKey);
-    entry.totalAmount += tx.amount;
-    entry.days.push(parseInt(tx.date.slice(8, 10), 10));
-    entry.count++;
-  }
-
-  const recurring: RecurringBill[] = [];
-  for (const [desc, data] of byDesc) {
-    if (data.months.size < 2) continue;
-
-    const avgAmount = data.totalAmount / data.count;
-
-    data.days.sort((a, b) => a - b);
-    const mid = Math.floor(data.days.length / 2);
-    const typicalDay =
-      data.days.length % 2 === 0
-        ? Math.round((data.days[mid - 1] + data.days[mid]) / 2)
-        : data.days[mid];
-
-    recurring.push({
+    // recurring_M_M1 is TRUE — add to charges list
+    charges.push({
       description: desc,
-      avgAmount,
-      typicalDay,
-      monthCount: data.months.size,
+      amountM: amountM!,
+      amountM1: amountM1!,
     });
+
+    if (!recurring_M1_M2) {
+      // First time qualifying → NEW
+      alerts.push({ kind: "new", description: desc });
+    } else if (amountM !== amountM1) {
+      // Was recurring before AND still is, but amount shifted → CHANGED
+      alerts.push({
+        kind: "amount-changed",
+        description: desc,
+        previousAmount: Math.round(amountM1!),
+        currentAmount: Math.round(amountM!),
+        diff: Math.round(amountM! - amountM1!),
+      });
+    }
   }
 
-  const today = new Date();
-  const isCurrentMonth =
-    today.getFullYear() === year && today.getMonth() + 1 === month;
-  const currentDay = isCurrentMonth ? today.getDate() : 0;
-  const daysInMonth = new Date(year, month, 0).getDate();
-
-  const upcoming = recurring.filter((b) => {
-    const day = Math.min(b.typicalDay, daysInMonth);
-    if (isCurrentMonth) return day >= currentDay;
-    return true;
-  });
-
-  upcoming.sort((a, b) => a.typicalDay - b.typicalDay);
-  return upcoming;
+  charges.sort((a, b) => b.amountM - a.amountM);
+  return { charges, alerts };
 }
