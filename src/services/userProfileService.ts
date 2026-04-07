@@ -1,14 +1,20 @@
 import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 import {
   DEFAULT_FINANCIAL_PROFILE,
   type UserFinancialProfile,
 } from "../types/userProfile";
 
-const ref = doc(db, "appSettings", "financialProfile");
+const DOC_ID = "financialProfile";
+const NOOP = () => {};
+
+function userRef() {
+  return doc(db, "users", getUid(), "settings", DOC_ID);
+}
 
 export async function getFinancialProfile(): Promise<UserFinancialProfile> {
-  const snap = await getDoc(ref);
+  if (!getUidOrNull()) return { ...DEFAULT_FINANCIAL_PROFILE };
+  const snap = await getDoc(userRef());
   if (!snap.exists()) return { ...DEFAULT_FINANCIAL_PROFILE };
   return { ...DEFAULT_FINANCIAL_PROFILE, ...snap.data() } as UserFinancialProfile;
 }
@@ -16,15 +22,16 @@ export async function getFinancialProfile(): Promise<UserFinancialProfile> {
 export async function saveFinancialProfile(
   profile: UserFinancialProfile,
 ): Promise<void> {
-  await setDoc(ref, profile, { merge: true });
+  await setDoc(userRef(), profile, { merge: true });
 }
 
 export function onFinancialProfileSnapshot(
   callback: (p: UserFinancialProfile) => void,
   onError?: (err: Error) => void,
 ): () => void {
+  if (!getUidOrNull()) { callback({ ...DEFAULT_FINANCIAL_PROFILE }); return NOOP; }
   return onSnapshot(
-    ref,
+    userRef(),
     (snap) => {
       if (snap.exists()) {
         callback({ ...DEFAULT_FINANCIAL_PROFILE, ...snap.data() } as UserFinancialProfile);

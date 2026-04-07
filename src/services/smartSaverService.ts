@@ -8,7 +8,7 @@ import {
   query,
   orderBy,
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 import {
   BANKS,
   CREDIT_CARDS,
@@ -24,15 +24,25 @@ import type { SavingsInsight } from "../types/smartSaver";
 // ── Firestore ───────────────────────────────────────────────────
 
 const COLLECTION = "savingsInsights";
-const colRef = collection(db, COLLECTION);
+const NOOP = () => {};
+
+function userCol() {
+  return collection(db, "users", getUid(), COLLECTION);
+}
+
+function userDoc(docId: string) {
+  return doc(db, "users", getUid(), COLLECTION, docId);
+}
 
 export async function getSavedInsights(): Promise<SavingsInsight[]> {
-  const q = query(colRef, orderBy("timestamp", "desc"));
+  if (!getUidOrNull()) return [];
+  const q = query(userCol(), orderBy("timestamp", "desc"));
   const snap = await getDocs(q);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as SavingsInsight);
 }
 
 export async function saveInsights(insights: SavingsInsight[]): Promise<void> {
+  const colRef = userCol();
   // Clear old insights first
   const existing = await getDocs(colRef);
   const deletes = existing.docs.map((d) => deleteDoc(d.ref));
@@ -40,7 +50,7 @@ export async function saveInsights(insights: SavingsInsight[]): Promise<void> {
 
   // Write new
   const writes = insights.map((ins) =>
-    setDoc(doc(db, COLLECTION, ins.id), ins),
+    setDoc(userDoc(ins.id), ins),
   );
   await Promise.all(writes);
 }
@@ -49,7 +59,8 @@ export function onInsightsSnapshot(
   callback: (insights: SavingsInsight[]) => void,
   onError?: (err: Error) => void,
 ): () => void {
-  const q = query(colRef, orderBy("timestamp", "desc"));
+  if (!getUidOrNull()) { callback([]); return NOOP; }
+  const q = query(userCol(), orderBy("timestamp", "desc"));
   return onSnapshot(
     q,
     (snap) => {

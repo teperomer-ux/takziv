@@ -1,7 +1,12 @@
 import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 
-const ref = doc(db, "appSettings", "global");
+const DOC_ID = "global";
+const NOOP = () => {};
+
+function userRef() {
+  return doc(db, "users", getUid(), "settings", DOC_ID);
+}
 
 export interface AppSettings {
   partner1Name: string;
@@ -20,7 +25,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export async function getSettings(): Promise<AppSettings> {
-  const snap = await getDoc(ref);
+  if (!getUidOrNull()) return { ...DEFAULT_SETTINGS };
+  const snap = await getDoc(userRef());
   if (!snap.exists()) return { ...DEFAULT_SETTINGS };
   return { ...DEFAULT_SETTINGS, ...snap.data() } as AppSettings;
 }
@@ -28,15 +34,16 @@ export async function getSettings(): Promise<AppSettings> {
 export async function saveSettings(
   settings: Partial<AppSettings>
 ): Promise<void> {
-  await setDoc(ref, settings, { merge: true });
+  await setDoc(userRef(), settings, { merge: true });
 }
 
 export function onSettingsSnapshot(
   callback: (s: AppSettings) => void,
   onError?: (err: Error) => void
 ): () => void {
+  if (!getUidOrNull()) { callback({ ...DEFAULT_SETTINGS }); return NOOP; }
   return onSnapshot(
-    ref,
+    userRef(),
     (snap) => {
       if (snap.exists()) {
         callback({ ...DEFAULT_SETTINGS, ...snap.data() } as AppSettings);

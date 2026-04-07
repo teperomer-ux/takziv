@@ -9,11 +9,19 @@ import {
   arrayRemove,
   onSnapshot,
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 import { CATEGORIES } from "../constants/categories";
 
 const COLLECTION = "categories";
-const colRef = collection(db, COLLECTION);
+const NOOP = () => {};
+
+function userCol() {
+  return collection(db, "users", getUid(), COLLECTION);
+}
+
+function userDoc(docId: string) {
+  return doc(db, "users", getUid(), COLLECTION, docId);
+}
 
 export interface CategoryDoc {
   name: string;
@@ -25,7 +33,8 @@ export interface CategoryDoc {
  * Returns a Record<string, string[]> matching the shape of the static CATEGORIES.
  */
 export async function getCategories(): Promise<Record<string, string[]>> {
-  const snapshot = await getDocs(colRef);
+  if (!getUidOrNull()) return {};
+  const snapshot = await getDocs(userCol());
   if (snapshot.empty) return {};
   const result: Record<string, string[]> = {};
   for (const d of snapshot.docs) {
@@ -43,8 +52,9 @@ export function onCategoriesSnapshot(
   callback: (cats: Record<string, string[]>) => void,
   onError?: (err: Error) => void
 ): () => void {
+  if (!getUidOrNull()) { callback({}); return NOOP; }
   return onSnapshot(
-    colRef,
+    userCol(),
     (snapshot) => {
       const result: Record<string, string[]> = {};
       for (const d of snapshot.docs) {
@@ -64,7 +74,7 @@ export function onCategoriesSnapshot(
 export async function addCategory(name: string): Promise<void> {
   const trimmed = name.trim();
   if (!trimmed) return;
-  await setDoc(doc(db, COLLECTION, trimmed), {
+  await setDoc(userDoc(trimmed), {
     name: trimmed,
     subCategories: [],
   });
@@ -82,8 +92,7 @@ export async function addSubCategory(
   const subTrimmed = subCategoryName.trim();
   if (!catTrimmed || !subTrimmed) return;
 
-  const ref = doc(db, COLLECTION, catTrimmed);
-  await updateDoc(ref, {
+  await updateDoc(userDoc(catTrimmed), {
     subCategories: arrayUnion(subTrimmed),
   });
 }
@@ -92,7 +101,7 @@ export async function addSubCategory(
 export async function deleteCategory(name: string): Promise<void> {
   const trimmed = name.trim();
   if (!trimmed) return;
-  await deleteDoc(doc(db, COLLECTION, trimmed));
+  await deleteDoc(userDoc(trimmed));
 }
 
 /** Remove a sub-category from a category. */
@@ -103,8 +112,7 @@ export async function removeSubCategory(
   const catTrimmed = categoryName.trim();
   const subTrimmed = subCategoryName.trim();
   if (!catTrimmed || !subTrimmed) return;
-  const ref = doc(db, COLLECTION, catTrimmed);
-  await updateDoc(ref, {
+  await updateDoc(userDoc(catTrimmed), {
     subCategories: arrayRemove(subTrimmed),
   });
 }
@@ -118,11 +126,11 @@ export async function renameCategory(
   const oldTrimmed = oldName.trim();
   const newTrimmed = newName.trim();
   if (!oldTrimmed || !newTrimmed || oldTrimmed === newTrimmed) return;
-  await setDoc(doc(db, COLLECTION, newTrimmed), {
+  await setDoc(userDoc(newTrimmed), {
     name: newTrimmed,
     subCategories,
   });
-  await deleteDoc(doc(db, COLLECTION, oldTrimmed));
+  await deleteDoc(userDoc(oldTrimmed));
 }
 
 /**
@@ -131,13 +139,14 @@ export async function renameCategory(
  * Call this once at app startup.
  */
 export async function seedCategories(): Promise<void> {
+  if (!getUidOrNull()) return;
   const existing = await getCategories();
   const promises: Promise<void>[] = [];
 
   for (const [name, subs] of Object.entries(CATEGORIES)) {
     if (!(name in existing)) {
       promises.push(
-        setDoc(doc(db, COLLECTION, name), {
+        setDoc(userDoc(name), {
           name,
           subCategories: subs,
         })

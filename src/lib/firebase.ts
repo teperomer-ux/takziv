@@ -37,4 +37,24 @@ try {
 const auth = getAuth(app);
 const googleProvider = new GoogleAuthProvider();
 
-export { app, db, auth, googleProvider };
+/**
+ * Returns the currently authenticated user's UID.
+ * Throws if no user is signed in — call this only from code paths
+ * that are gated behind authentication (which the App component ensures).
+ */
+function getUid(): string {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new Error("Not authenticated — getUid() called before onAuthStateChanged resolved");
+  return uid;
+}
+
+/**
+ * Non-throwing variant: returns the UID or null.
+ * Use this in guards that should silently bail out (e.g. snapshot listeners
+ * that may fire during the auth-loading window).
+ */
+function getUidOrNull(): string | null {
+  return auth.currentUser?.uid ?? null;
+}
+
+export { app, db, auth, googleProvider, getUid, getUidOrNull };

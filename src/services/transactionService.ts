@@ -12,11 +12,21 @@ import {
   onSnapshot,
   Timestamp,
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 import type { Transaction } from "../types";
 
 const COLLECTION = "transactions";
-const colRef = collection(db, COLLECTION);
+const NOOP = () => {};
+
+/** Return the user-scoped collection: users/{uid}/transactions */
+function userCol() {
+  return collection(db, "users", getUid(), COLLECTION);
+}
+
+/** Return a user-scoped document ref: users/{uid}/transactions/{docId} */
+function userDoc(docId: string) {
+  return doc(db, "users", getUid(), COLLECTION, docId);
+}
 
 // ─── Converters ─────────────────────────────────────────────────────────────
 
@@ -71,7 +81,7 @@ function toFirestoreData(tx: Omit<Transaction, "id">) {
 export async function addTransaction(
   tx: Omit<Transaction, "id">
 ): Promise<string> {
-  const ref = await addDoc(colRef, toFirestoreData(tx));
+  const ref = await addDoc(userCol(), toFirestoreData(tx));
   return ref.id;
 }
 
@@ -79,6 +89,7 @@ export async function addTransaction(
 export async function bulkSaveTransactions(
   txs: Omit<Transaction, "id">[]
 ): Promise<void> {
+  const colRef = userCol();
   for (let i = 0; i < txs.length; i += 500) {
     const chunk = txs.slice(i, i + 500);
     const batch = writeBatch(db);
@@ -95,7 +106,7 @@ export async function updateTransaction(
   id: string,
   data: Partial<Omit<Transaction, "id">>
 ): Promise<void> {
-  const ref = doc(db, COLLECTION, id);
+  const ref = userDoc(id);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const updates: Record<string, any> = { ...data };
   if (data.date) {
@@ -107,7 +118,7 @@ export async function updateTransaction(
 
 /** Delete a transaction by ID. */
 export async function deleteTransaction(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTION, id));
+  await deleteDoc(userDoc(id));
 }
 
 /**
@@ -123,6 +134,8 @@ export async function deleteMonthTransactions(
   month: number,
 ): Promise<number> {
   console.log(`🔥 DELETE START: billingMonth=${month}, billingYear=${year}`);
+
+  const colRef = userCol();
 
   // 1. Fetch every document in the collection
   const allSnapshot = await getDocs(query(colRef, orderBy("date", "desc")));
@@ -176,7 +189,8 @@ export async function deleteMonthTransactions(
 
 /** Fetch every transaction in the collection (one-shot). */
 export async function getAllTransactions(): Promise<Transaction[]> {
-  const q = query(colRef, orderBy("date", "desc"));
+  if (!getUidOrNull()) return [];
+  const q = query(userCol(), orderBy("date", "desc"));
   const snapshot = await getDocs(q);
   return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
 }
@@ -187,7 +201,7 @@ export async function getTransactionsByMonth(
   month: number
 ): Promise<Transaction[]> {
   const q = query(
-    colRef,
+    userCol(),
     where("billingYear", "==", year),
     where("billingMonth", "==", month),
     orderBy("date", "desc")
@@ -210,8 +224,9 @@ export function onTransactionsSnapshot(
   callback: (txs: Transaction[]) => void,
   onError?: (err: Error) => void
 ): () => void {
+  if (!getUidOrNull()) { callback([]); return NOOP; }
   const q = query(
-    colRef,
+    userCol(),
     where("billingYear", "==", year),
     where("billingMonth", "==", month),
     orderBy("date", "desc")

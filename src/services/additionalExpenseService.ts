@@ -7,10 +7,18 @@ import {
   query,
   orderBy,
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 
 const COLLECTION = "additionalExpenses";
-const colRef = collection(db, COLLECTION);
+const NOOP = () => {};
+
+function userCol() {
+  return collection(db, "users", getUid(), COLLECTION);
+}
+
+function userDoc(docId: string) {
+  return doc(db, "users", getUid(), COLLECTION, docId);
+}
 
 export type ExpenseKind = "recurring" | "one-time";
 
@@ -29,7 +37,8 @@ export function onAdditionalExpensesSnapshot(
   callback: (expenses: AdditionalExpense[]) => void,
   onError?: (err: Error) => void,
 ): () => void {
-  const q = query(colRef, orderBy("monthKey", "desc"));
+  if (!getUidOrNull()) { callback([]); return NOOP; }
+  const q = query(userCol(), orderBy("monthKey", "desc"));
   return onSnapshot(
     q,
     (snapshot) => {
@@ -45,8 +54,9 @@ export function onAdditionalExpensesSnapshot(
 export async function saveAdditionalExpense(
   expense: Omit<AdditionalExpense, "id"> & { id?: string },
 ): Promise<string> {
+  const colRef = userCol();
   const id = expense.id ?? doc(colRef).id;
-  await setDoc(doc(db, COLLECTION, id), {
+  await setDoc(userDoc(id), {
     description: expense.description,
     amount: expense.amount,
     category: expense.category,
@@ -58,7 +68,7 @@ export async function saveAdditionalExpense(
 
 /** Delete an additional expense entry. */
 export async function deleteAdditionalExpense(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTION, id));
+  await deleteDoc(userDoc(id));
 }
 
 /**

@@ -12,11 +12,19 @@ import {
   onSnapshot,
   Timestamp,
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { db, getUid, getUidOrNull } from "../lib/firebase";
 import type { Transaction } from "../types";
 
 const COLLECTION = "incomeTransactions";
-const colRef = collection(db, COLLECTION);
+const NOOP = () => {};
+
+function userCol() {
+  return collection(db, "users", getUid(), COLLECTION);
+}
+
+function userDoc(docId: string) {
+  return doc(db, "users", getUid(), COLLECTION, docId);
+}
 
 // ─── Converters ─────────────────────────────────────────────────────────────
 
@@ -56,13 +64,14 @@ function toFirestoreData(tx: Omit<Transaction, "id">) {
 export async function addIncomeTransaction(
   tx: Omit<Transaction, "id">
 ): Promise<string> {
-  const ref = await addDoc(colRef, toFirestoreData(tx));
+  const ref = await addDoc(userCol(), toFirestoreData(tx));
   return ref.id;
 }
 
 export async function bulkSaveIncomeTransactions(
   txs: Omit<Transaction, "id">[]
 ): Promise<void> {
+  const colRef = userCol();
   for (let i = 0; i < txs.length; i += 500) {
     const chunk = txs.slice(i, i + 500);
     const batch = writeBatch(db);
@@ -78,7 +87,7 @@ export async function updateIncomeTransaction(
   id: string,
   data: Partial<Omit<Transaction, "id">>
 ): Promise<void> {
-  const ref = doc(db, COLLECTION, id);
+  const ref = userDoc(id);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const updates: Record<string, any> = { ...data };
   if (data.date) {
@@ -88,13 +97,14 @@ export async function updateIncomeTransaction(
 }
 
 export async function deleteIncomeTransaction(id: string): Promise<void> {
-  await deleteDoc(doc(db, COLLECTION, id));
+  await deleteDoc(userDoc(id));
 }
 
 export async function deleteMonthIncomeTransactions(
   year: number,
   month: number
 ): Promise<number> {
+  const colRef = userCol();
   const start = new Date(year, month - 1, 1);
   const end = new Date(year, month, 1);
 
@@ -120,7 +130,8 @@ export async function deleteMonthIncomeTransactions(
 // ─── Read operations ────────────────────────────────────────────────────────
 
 export async function getAllIncomeTransactions(): Promise<Transaction[]> {
-  const q = query(colRef, orderBy("date", "desc"));
+  if (!getUidOrNull()) return [];
+  const q = query(userCol(), orderBy("date", "desc"));
   const snapshot = await getDocs(q);
   return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
 }
@@ -133,6 +144,8 @@ export function onIncomeTransactionsSnapshot(
   callback: (txs: Transaction[]) => void,
   onError?: (err: Error) => void
 ): () => void {
+  if (!getUidOrNull()) { callback([]); return NOOP; }
+  const colRef = userCol();
   const start = new Date(year, month - 1, 1);
   const end = new Date(year, month, 1);
 

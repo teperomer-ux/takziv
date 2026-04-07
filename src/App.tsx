@@ -20,20 +20,6 @@ const MONTH_NAMES = [
 
 export default function App() {
   const { user, loading: authLoading, error: authError, signInWithGoogle, signOut } = useAuth();
-  const [tab, setTab] = useState<Tab>("dashboard");
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [filterUncategorized, setFilterUncategorized] = useState(false);
-  const { transactions, loading, error, update, remove, removeAll, setMonth, year, month } =
-    useTransactions();
-  const incomeTx = useIncomeTransactions();
-  const categoriesCtx = useCategoriesProvider();
-  const incomeCategoriesCtx = useIncomeCategoriesProvider();
-  const settingsCtx = useSettingsProvider();
-
-  // Apply dark class to <html> based on Firestore-persisted theme
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", settingsCtx.settings.theme === "dark");
-  }, [settingsCtx.settings.theme]);
 
   // ── Auth gate ─────────────────────────────────────────────────────────
   if (authLoading) {
@@ -50,6 +36,31 @@ export default function App() {
   if (!user) {
     return <Login error={authError} onSignIn={signInWithGoogle} />;
   }
+
+  // Only mount data-fetching hooks AFTER auth is confirmed
+  return <AuthenticatedApp signOut={signOut} />;
+}
+
+// ─── Inner component — only mounts when user is authenticated ───────────────
+// This ensures every hook that subscribes to Firestore (useTransactions,
+// useCategoriesProvider, useSettingsProvider, etc.) only runs AFTER
+// auth.currentUser is set, so getUid() never throws.
+
+function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
+  const [tab, setTab] = useState<Tab>("dashboard");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [filterUncategorized, setFilterUncategorized] = useState(false);
+  const { transactions, loading, error, update, remove, removeAll, setMonth, year, month } =
+    useTransactions();
+  const incomeTx = useIncomeTransactions();
+  const categoriesCtx = useCategoriesProvider();
+  const incomeCategoriesCtx = useIncomeCategoriesProvider();
+  const settingsCtx = useSettingsProvider();
+
+  // Apply dark class to <html> based on Firestore-persisted theme
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", settingsCtx.settings.theme === "dark");
+  }, [settingsCtx.settings.theme]);
 
   function prevMonth() {
     if (month === 1) { setMonth(year - 1, 12); incomeTx.setMonth(year - 1, 12); }
