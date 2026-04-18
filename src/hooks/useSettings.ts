@@ -27,6 +27,9 @@ export function useSettingsProvider(): SettingsContextValue {
       (s) => {
         setSettings(s);
         setLoading(false);
+        // Keep localStorage in sync so the next page load has the right theme
+        localStorage.setItem("takziv_theme", s.theme);
+        document.documentElement.classList.toggle("dark", s.theme === "dark");
       },
       (err) => {
         console.warn("[useSettings] snapshot error:", err);
@@ -52,6 +55,11 @@ export function useSettingsProvider(): SettingsContextValue {
 
   const updateSettings = useCallback(async (patch: Partial<AppSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
+    if (patch.theme) {
+      // Mirror to localStorage so the next page load can apply instantly
+      localStorage.setItem("takziv_theme", patch.theme);
+      document.documentElement.classList.toggle("dark", patch.theme === "dark");
+    }
     await saveSettingsToDb(patch);
   }, []);
 

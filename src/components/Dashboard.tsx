@@ -59,7 +59,7 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   const [loadingAvg, setLoadingAvg] = useState(true);
   const [additionalExpenses, setAdditionalExpenses] = useState<AdditionalExpense[]>([]);
   const [incomeTransactions, setIncomeTransactions] = useState<Transaction[]>([]);
-  const [activeChart, setActiveChart] = useState<"months" | "categories">("months");
+  const [activeChart, setActiveChart] = useState<"months" | "categories">("categories");
   const [smartSaverOpen, setSmartSaverOpen] = useState(false);
   const [hasProfile, setHasProfile] = useState(true);
   const [financialProfile, setFinancialProfile] = useState<UserFinancialProfile>({

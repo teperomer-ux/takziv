@@ -10,6 +10,15 @@
       rel="stylesheet"
     />
     <title>תקציב - ניהול תקציב</title>
+    <script>
+      // Apply saved theme instantly to prevent flash-of-wrong-theme.
+      // Runs before React mounts. Default: light.
+      try {
+        if (localStorage.getItem("takziv_theme") === "dark") {
+          document.documentElement.classList.add("dark");
+        }
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

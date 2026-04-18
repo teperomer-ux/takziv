@@ -31,14 +31,13 @@ export default function MonthlyTrend({ allTransactions, year, month }: Props) {
       let y = year;
       while (m <= 0) { m += 12; y--; }
 
-      const monthKey = `${y}-${String(m).padStart(2, "0")}`;
       let total = 0;
       for (const tx of allTransactions) {
-        if (tx.category === "מקורות הכנסה" || !tx.category) continue;
-        if (tx.date.slice(0, 7) === monthKey) total += tx.amount;
+        if (tx.category === "מקורות הכנסה") continue;
+        if (tx.billingYear === y && tx.billingMonth === m) total += tx.amount;
       }
       points.push({
-        key: monthKey,
+        key: `${y}-${String(m).padStart(2, "0")}`,
         label: SHORT_MONTHS[m - 1],
         total: Math.round(total),
         isCurrent: i === 0,

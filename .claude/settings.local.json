@@ -11,7 +11,8 @@
       "Bash(npx firebase:*)",
       "Bash(npm ls:*)",
       "Bash(firebase deploy:*)",
-      "Bash(npx skills-il:*)"
+      "Bash(npx skills-il:*)",
+      "Bash(npx tailwindcss:*)"
     ]
   }
 }

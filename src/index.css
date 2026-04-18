@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Enable class-based dark mode: the "dark" class on <html> controls dark:* utilities.
+   Without this, Tailwind v4 defaults to prefers-color-scheme (OS-level), ignoring
+   the in-app toggle completely. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --font-heebo: "Heebo", sans-serif;
   --color-primary: #0f766e;
@@ -12,6 +17,17 @@
 body {
   font-family: var(--font-heebo);
   -webkit-tap-highlight-color: transparent;
+}
+
+/* ── Remove mobile tap highlight & focus outlines on Recharts charts ─── */
+.recharts-wrapper,
+.recharts-surface,
+.recharts-responsive-container,
+.recharts-wrapper svg {
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Hide scrollbar but keep scroll functionality */

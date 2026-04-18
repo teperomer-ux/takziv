@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Settings, LogOut } from "lucide-react";
 import BottomNav, { type Tab } from "./components/BottomNav";
 import Dashboard from "./components/Dashboard";
@@ -56,11 +56,6 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
   const categoriesCtx = useCategoriesProvider();
   const incomeCategoriesCtx = useIncomeCategoriesProvider();
   const settingsCtx = useSettingsProvider();
-
-  // Apply dark class to <html> based on Firestore-persisted theme
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", settingsCtx.settings.theme === "dark");
-  }, [settingsCtx.settings.theme]);
 
   function prevMonth() {
     if (month === 1) { setMonth(year - 1, 12); incomeTx.setMonth(year - 1, 12); }

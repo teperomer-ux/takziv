@@ -131,9 +131,17 @@ export default function TransactionList({
 
   const monthLabel = `${MONTH_NAMES[month - 1]} ${year}`;
 
-  const displayedTransactions = filterUncategorized
+  const displayedTransactions = (filterUncategorized
     ? transactions.filter((tx) => !tx.category)
-    : transactions;
+    : [...transactions]
+  ).sort((a, b) => {
+    // Primary: uncategorized first
+    const aUncat = !a.category ? 0 : 1;
+    const bUncat = !b.category ? 0 : 1;
+    if (aUncat !== bUncat) return aUncat - bUncat;
+    // Secondary: newest date first
+    return b.date.localeCompare(a.date);
+  });
 
   if (transactions.length === 0) {
     return (
@@ -266,22 +274,17 @@ export default function TransactionList({
             {/* Row 1: date, description, amount, status */}
             <div className="flex items-center justify-between gap-2 mb-3">
               <div className="flex items-center gap-3 min-w-0">
-                <input
-                  type="date"
-                  value={tx.date}
-                  onChange={(e) => onUpdate(tx.id, "date", e.target.value)}
-                  className="w-[130px] shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
+                <span
+                  className="w-[130px] shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm inline-block"
                   dir="ltr"
-                />
-                <input
-                  type="text"
-                  value={tx.description}
-                  onChange={(e) =>
-                    onUpdate(tx.id, "description", e.target.value)
-                  }
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
-                  placeholder="בית עסק"
-                />
+                >
+                  {tx.date}
+                </span>
+                <span
+                  className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm truncate inline-block"
+                >
+                  {tx.description || "בית עסק"}
+                </span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <span
