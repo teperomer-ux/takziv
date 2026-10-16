@@ -21,9 +21,13 @@ export type BankSyncErrorCode =
 
 export interface BankSyncResult {
   savedCount: number;
+  savedExpenseCount: number;
+  /** Bank credits saved to users/{uid}/incomeTransactions. */
+  savedIncomeCount: number;
   duplicateCount: number;
   skippedPendingCount: number;
-  skippedIncomeCount: number;
+  /** Bank debits that were credit-card bill payments (covered by the card's own sync). */
+  skippedCardPaymentCount: number;
   accounts: { accountNumber: string; balance: number | null }[];
 }
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import { Settings, LogOut } from "lucide-react";
 import BottomNav, { type Tab } from "./components/BottomNav";
 import Dashboard from "./components/Dashboard";
@@ -12,6 +12,42 @@ import { CategoriesContext, useCategoriesProvider } from "./hooks/useCategories"
 import { IncomeCategoriesContext, useIncomeCategoriesProvider } from "./hooks/useIncomeCategories";
 import { SettingsContext, useSettingsProvider } from "./hooks/useSettings";
 import { useAuth } from "./hooks/useAuth";
+import { getUidOrNull } from "./lib/firebase";
+import { saveMapping } from "./services/mappingService";
+import type { Transaction } from "./types";
+
+type UpdateFn = (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
+type CategoryPair = { category: string; subCategory: string };
+
+/**
+ * Wraps a list's update handler so that categorising a row also teaches the
+ * classifier (users/{uid}/{colName}); the bank sync applies these mappings to
+ * future imports. Lists set category and subCategory in back-to-back calls,
+ * so the latest pair per row is tracked locally instead of read from props.
+ */
+function useCategoryLearning(update: UpdateFn, rows: Transaction[], colName: string): UpdateFn {
+  const latest = useRef(new Map<string, CategoryPair>());
+  return useCallback<UpdateFn>(
+    (id, field, value) => {
+      update(id, field, value);
+      if (field !== "category" && field !== "subCategory") return;
+
+      const tx = rows.find((t) => t.id === id);
+      const uid = getUidOrNull();
+      if (!tx || !uid) return;
+
+      const base = latest.current.get(id) ?? { category: tx.category, subCategory: tx.subCategory };
+      const next = { ...base, [field]: String(value) };
+      latest.current.set(id, next);
+      if (!next.category) return;
+
+      saveMapping(uid, tx.description, next.category, next.subCategory, colName).catch((err) =>
+        console.warn("[App] failed to learn category mapping:", err),
+      );
+    },
+    [update, rows, colName],
+  );
+}
 
 const MONTH_NAMES = [
   "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
@@ -53,6 +89,29 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
   const { transactions, loading, error, update, remove, removeAll, setMonth, year, month } =
     useTransactions();
   const incomeTx = useIncomeTransactions();
+
+  // ── Source split ──────────────────────────────────────────────
+  // `transactions` is the union of synced card + עו״ש rows for the active
+  // month. The three views consume strictly different slices:
+  //
+  //   • TransactionList ("כרטיסי אשראי")  → creditCardTransactions
+  //   • IncomeList      ("עובר ושב")      → incomeTx + bankTransactions
+  //   • Dashboard       ("ראשי")          → the full union (both combined)
+  //
+  // Legacy rows that predate `source` (undefined) count as credit-card —
+  // they were imported by the former CC file uploader before the field existed.
+  const creditCardTransactions = useMemo(
+    () => transactions.filter((tx) => tx.source !== "bank"),
+    [transactions],
+  );
+  const bankTransactions = useMemo(
+    () => transactions.filter((tx) => tx.source === "bank"),
+    [transactions],
+  );
+
+  const updateExpense = useCategoryLearning(update, transactions, "learnedMappings");
+  const updateIncome = useCategoryLearning(incomeTx.update, incomeTx.transactions, "learnedIncomeMappings");
+
   const categoriesCtx = useCategoriesProvider();
   const incomeCategoriesCtx = useIncomeCategoriesProvider();
   const settingsCtx = useSettingsProvider();
@@ -157,10 +216,10 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
             )}
             {tab === "expenses" && (
               <TransactionList
-                transactions={transactions}
+                transactions={creditCardTransactions}
                 year={year}
                 month={month}
-                onUpdate={update}
+                onUpdate={updateExpense}
                 onDelete={remove}
                 onDeleteAll={removeAll}
                 filterUncategorized={filterUncategorized}
@@ -170,9 +229,11 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
             {tab === "incomes" && (
               <IncomeList
                 transactions={incomeTx.transactions}
+                bankTransactions={bankTransactions}
+                onBankDelete={remove}
                 year={year}
                 month={month}
-                onUpdate={incomeTx.update}
+                onUpdate={updateIncome}
                 onDelete={incomeTx.remove}
                 onDeleteAll={incomeTx.removeAll}
               />

@@ -191,6 +191,14 @@ export default function BankSyncModal({ onClose }: Props) {
                 : "לא נמצאו עסקאות חדשות"}
             </p>
             <div className="text-xs text-slate-400 mt-2 space-y-0.5">
+              {phase.result.savedIncomeCount > 0 && (
+                <p>
+                  {phase.result.savedExpenseCount} הוצאות ו-{phase.result.savedIncomeCount} הכנסות
+                </p>
+              )}
+              {phase.result.skippedCardPaymentCount > 0 && (
+                <p>{phase.result.skippedCardPaymentCount} חיובי כרטיסי אשראי דולגו — סנכרנו את הכרטיס עצמו לפירוט</p>
+              )}
               {phase.result.duplicateCount > 0 && (
                 <p>{phase.result.duplicateCount} עסקאות כבר היו קיימות ולא שוכפלו</p>
               )}

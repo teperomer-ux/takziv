@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import type { CompanyTypes } from "israeli-bank-scrapers";
 import { suggestCategory, type UserMapping } from "../../src/utils/classifier.js";
+import { suggestIncomeCategory } from "../../src/utils/incomeClassifier.js";
+import { matchCreditCardCompany } from "../../src/utils/bankReconciliation.js";
 import type { ScrapedAccount } from "./scrapeRunner.js";
 
 /** Same slugs as `TransactionSource` in src/types/index.ts. */
@@ -24,7 +26,7 @@ const SOURCE_BY_COMPANY: Partial<Record<CompanyTypes, TransactionSource>> = {
   oneZero: "bank",
 };
 
-/** A transaction ready to write to users/{uid}/transactions/{id}. */
+/** A row ready to write to users/{uid}/transactions or users/{uid}/incomeTransactions. */
 export interface MappedTransaction {
   id: string;
   /** YYYY-MM-DD in Israel time. */
@@ -38,10 +40,19 @@ export interface MappedTransaction {
   source?: TransactionSource;
 }
 
+export interface UserMappings {
+  expense: UserMapping[];
+  income: UserMapping[];
+}
+
 export interface MapResult {
-  transactions: MappedTransaction[];
+  /** Card purchases / direct bank debits → users/{uid}/transactions */
+  expenses: MappedTransaction[];
+  /** Bank credits (salary, transfers in, …) → users/{uid}/incomeTransactions */
+  incomes: MappedTransaction[];
   skippedPending: number;
-  skippedIncome: number;
+  /** Bank debits that are the monthly lump-sum credit-card bill. */
+  skippedCardPayments: number;
 }
 
 const israelDate = new Intl.DateTimeFormat("en-CA", {
@@ -61,35 +72,38 @@ function toIsraelYmd(iso: string): string {
 }
 
 /**
- * Maps scraper output onto the app's Transaction shape:
- *  - amounts follow the app's convention: charges positive, refunds negative
- *    (scrapers report charges as negative chargedAmount)
- *  - billing month comes from the charge (processed) date
+ * Maps scraper output onto the app's Transaction shape, mirroring how the
+ * former file uploaders split the data:
+ *  - card accounts: charges positive, refunds negative, billing month from
+ *    the charge (processed) date
+ *  - bank accounts: credits become incomes; debits that are a credit-card
+ *    bill payment are dropped (the card's own transactions already cover
+ *    that money); every other debit is a "bank" expense
  *  - pending transactions are skipped — their amount/identifier can still change
- *  - for bank accounts only debits are kept; incoming money belongs to income
  *  - each doc id is a hash of the bank-side identity so re-syncing the same
  *    range never creates duplicates
  */
 export function mapScrapedTransactions(
   companyId: CompanyTypes,
   accounts: ScrapedAccount[],
-  userMappings: UserMapping[],
+  mappings: UserMappings,
 ): MapResult {
   const source = SOURCE_BY_COMPANY[companyId];
   const isBank = source === "bank";
   const seen = new Map<string, number>();
-  const transactions: MappedTransaction[] = [];
-  let skippedPending = 0;
-  let skippedIncome = 0;
+  const result: MapResult = { expenses: [], incomes: [], skippedPending: 0, skippedCardPayments: 0 };
 
   for (const account of accounts) {
     for (const txn of account.txns) {
       if (txn.status === "pending") {
-        skippedPending++;
+        result.skippedPending++;
         continue;
       }
-      if (isBank && txn.chargedAmount >= 0) {
-        skippedIncome++;
+
+      const description = txn.description.trim();
+      const isIncome = isBank && txn.chargedAmount > 0;
+      if (isBank && !isIncome && matchCreditCardCompany(description)) {
+        result.skippedCardPayments++;
         continue;
       }
 
@@ -97,8 +111,6 @@ export function mapScrapedTransactions(
       const [billingYear, billingMonth] = toIsraelYmd(txn.processedDate || txn.date)
         .split("-")
         .map(Number);
-      const amount = -txn.chargedAmount;
-      const description = txn.description.trim();
 
       const identity = [
         companyId,
@@ -109,16 +121,32 @@ export function mapScrapedTransactions(
         description,
         txn.installments ? `${txn.installments.number}/${txn.installments.total}` : "",
       ].join("|");
-      // Two genuinely identical charges on the same day (no bank identifier)
+      // Two genuinely identical rows on the same day (no bank identifier)
       // are told apart by their order of appearance in the scrape.
       const occurrence = (seen.get(identity) ?? 0) + 1;
       seen.set(identity, occurrence);
       const id = createHash("sha256").update(`${identity}#${occurrence}`).digest("hex").slice(0, 40);
 
-      const match = suggestCategory(description, userMappings);
-      const isCredit = amount < 0;
+      if (isIncome) {
+        const match = suggestIncomeCategory(description, mappings.income);
+        result.incomes.push({
+          id,
+          date,
+          description,
+          amount: txn.chargedAmount,
+          category: match?.category ?? "",
+          subCategory: match?.subCategory ?? "",
+          billingMonth,
+          billingYear,
+        });
+        continue;
+      }
 
-      transactions.push({
+      // Scrapers report charges as negative; the app stores them positive.
+      const amount = -txn.chargedAmount;
+      const match = suggestCategory(description, mappings.expense);
+      const isCredit = amount < 0;
+      result.expenses.push({
         id,
         date,
         description,
@@ -132,5 +160,5 @@ export function mapScrapedTransactions(
     }
   }
 
-  return { transactions, skippedPending, skippedIncome };
+  return result;
 }

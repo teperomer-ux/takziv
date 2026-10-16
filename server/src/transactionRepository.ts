@@ -1,30 +1,46 @@
 import { Timestamp, type DocumentReference } from "firebase-admin/firestore";
 import type { UserMapping } from "../../src/utils/classifier.js";
 import { adminDb } from "./firebaseAdmin.js";
-import type { MappedTransaction } from "./transactionMapper.js";
+import type { MappedTransaction, UserMappings } from "./transactionMapper.js";
 
 const BATCH_LIMIT = 500;
 
-/** The user's learned description → category mappings (users/{uid}/learnedMappings). */
-export async function getUserMappings(userId: string): Promise<UserMapping[]> {
-  const snapshot = await adminDb.collection("users").doc(userId).collection("learnedMappings").get();
-  return snapshot.docs.map((d) => {
-    const data = d.data();
-    return {
-      description: String(data.description ?? ""),
-      category: String(data.category ?? ""),
-      subCategory: String(data.subCategory ?? ""),
-    };
-  }).filter((m) => m.description);
+export type TargetCollection = "transactions" | "incomeTransactions";
+
+async function readMappings(userId: string, collection: string): Promise<UserMapping[]> {
+  const snapshot = await adminDb.collection("users").doc(userId).collection(collection).get();
+  return snapshot.docs
+    .map((d) => {
+      const data = d.data();
+      return {
+        description: String(data.description ?? ""),
+        category: String(data.category ?? ""),
+        subCategory: String(data.subCategory ?? ""),
+      };
+    })
+    .filter((m) => m.description);
+}
+
+/** The user's learned description → category mappings for expenses and incomes. */
+export async function getUserMappings(userId: string): Promise<UserMappings> {
+  const [expense, income] = await Promise.all([
+    readMappings(userId, "learnedMappings"),
+    readMappings(userId, "learnedIncomeMappings"),
+  ]);
+  return { expense, income };
 }
 
 /**
- * Inserts transactions that don't exist yet into users/{uid}/transactions.
+ * Inserts rows that don't exist yet into users/{uid}/{collection}.
  * Existing docs (same deterministic id) are left untouched so a re-sync never
  * overwrites categories the user already edited. Returns the number inserted.
  */
-export async function saveNewTransactions(userId: string, txs: MappedTransaction[]): Promise<number> {
-  const col = adminDb.collection("users").doc(userId).collection("transactions");
+export async function saveNewTransactions(
+  userId: string,
+  collection: TargetCollection,
+  txs: MappedTransaction[],
+): Promise<number> {
+  const col = adminDb.collection("users").doc(userId).collection(collection);
   let inserted = 0;
 
   for (let i = 0; i < txs.length; i += BATCH_LIMIT) {

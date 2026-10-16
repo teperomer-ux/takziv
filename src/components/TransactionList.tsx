@@ -1,7 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
-import { Trash2, Upload, X } from "lucide-react";
-import type { Transaction } from "../types";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Trash2, RefreshCw, X } from "lucide-react";
+import type { Transaction, TransactionSource } from "../types";
 import { useCategories } from "../hooks/useCategories";
+import { isUncategorized, byUncategorizedThenDate } from "../utils/categoryStatus";
+import { SOURCE_LABELS } from "../utils/bankReconciliation";
 import {
   onAdditionalExpensesSnapshot,
   saveAdditionalExpense,
@@ -9,7 +11,7 @@ import {
   type AdditionalExpense,
   type ExpenseKind,
 } from "../services/additionalExpenseService";
-import FileUploader from "./FileUploader";
+import BankSyncModal from "./BankSyncModal";
 import AddExpenseModal from "./AddExpenseModal";
 
 const MONTH_NAMES = [
@@ -29,6 +31,29 @@ interface Props {
 }
 
 const ADD_NEW = "__add_new__";
+
+/**
+ * Light-background palette per provider. Each entry pairs a tinted surface
+ * with the matching ink colour so the badge stays legible in dark mode.
+ */
+const SOURCE_BADGE_STYLES: Record<TransactionSource, string> = {
+  max: "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300",
+  isracard: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300",
+  cal: "bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300",
+  bank: "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300",
+};
+
+function SourceBadge({ source }: { source: TransactionSource | undefined }) {
+  if (!source) return null;
+  return (
+    <span
+      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap ${SOURCE_BADGE_STYLES[source]}`}
+      title={SOURCE_LABELS[source]}
+    >
+      {SOURCE_LABELS[source]}
+    </span>
+  );
+}
 
 export default function TransactionList({
   transactions,
@@ -52,7 +77,7 @@ export default function TransactionList({
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [uploadOpen, setUploadOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
   const [expenseModalKind, setExpenseModalKind] = useState<ExpenseKind | null>(null);
   const [additionalExpenses, setAdditionalExpenses] = useState<AdditionalExpense[]>([]);
 
@@ -131,34 +156,43 @@ export default function TransactionList({
 
   const monthLabel = `${MONTH_NAMES[month - 1]} ${year}`;
 
-  const displayedTransactions = (filterUncategorized
-    ? transactions.filter((tx) => !tx.category)
-    : [...transactions]
-  ).sort((a, b) => {
-    // Primary: uncategorized first
-    const aUncat = !a.category ? 0 : 1;
-    const bUncat = !b.category ? 0 : 1;
-    if (aUncat !== bUncat) return aUncat - bUncat;
-    // Secondary: newest date first
-    return b.date.localeCompare(a.date);
-  });
+  // ── CC-only guard ────────────────────────────────────────────────
+  // This view is the "כרטיסי אשראי" tab — strictly credit-card rows.
+  // The parent (`App.tsx`) already passes a pre-filtered slice, but we
+  // re-apply the filter here so the component is self-protective: any
+  // future call site that hands us the unfiltered union won't leak
+  // עו״ש rows (source === "bank") into the CC list, its header count,
+  // empty-state, or any downstream sum derived from this array.
+  // Legacy rows (`source === undefined`) predate the field — they came
+  // from the CC uploader before tagging existed, so they count as CC.
+  const creditCardOnly = useMemo(
+    () => transactions.filter((tx) => tx.source !== "bank"),
+    [transactions],
+  );
 
-  if (transactions.length === 0) {
+  const displayedTransactions = useMemo(() => {
+    const base = filterUncategorized
+      ? creditCardOnly.filter((tx) => isUncategorized(tx.category))
+      : creditCardOnly;
+    // Copy before sorting so we never mutate the parent array.
+    // Uncategorized rows float to the top, newest date first within each group.
+    return [...base].sort(byUncategorizedThenDate);
+  }, [creditCardOnly, filterUncategorized]);
+
+  if (creditCardOnly.length === 0) {
     return (
       <>
         <div className="rounded-2xl bg-white dark:bg-slate-900 p-8 text-center border border-slate-200/60 dark:border-slate-700/60">
           <p className="text-slate-400 mb-4">אין עסקאות להצגה.</p>
           <button
-            onClick={() => setUploadOpen(true)}
+            onClick={() => setSyncOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl bg-primary text-white px-5 py-2.5 text-sm font-semibold shadow-sm hover:bg-primary/90 transition-colors min-h-[44px]"
           >
-            <Upload className="h-4 w-4" />
-            העלאת קובץ חיובים
+            <RefreshCw className="h-4 w-4" />
+            סנכרון חשבון בנק / אשראי
           </button>
         </div>
-        {uploadOpen && (
-          <UploadModal onClose={() => setUploadOpen(false)} billingMonth={month} billingYear={year} />
-        )}
+        {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
       </>
     );
   }
@@ -172,21 +206,21 @@ export default function TransactionList({
         </div>
       )}
 
-      {/* ── Month header with upload + delete buttons ─────────── */}
+      {/* ── Month header with sync + delete buttons ───────────── */}
       <div className="flex items-center justify-between mb-4 px-1">
         <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">
-          הוצאות — {monthLabel} ({displayedTransactions.length}{filterUncategorized ? `/${transactions.length}` : ""})
+          הוצאות — {monthLabel} ({displayedTransactions.length}{filterUncategorized ? `/${creditCardOnly.length}` : ""})
         </h2>
 
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setUploadOpen(true)}
+            onClick={() => setSyncOpen(true)}
             className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-primary transition-colors p-2.5 rounded-xl hover:bg-primary/5"
-            aria-label="העלאת קובץ חיובים"
-            title="העלאת קובץ חיובים"
+            aria-label="סנכרון חשבון בנק / אשראי"
+            title="סנכרון חשבון בנק / אשראי"
           >
-            <Upload className="h-4 w-4" />
-            <span className="hidden sm:inline">העלאת קובץ</span>
+            <RefreshCw className="h-4 w-4" />
+            <span className="hidden sm:inline">סנכרון</span>
           </button>
 
         {confirmDeleteAll ? (
@@ -271,64 +305,67 @@ export default function TransactionList({
             key={tx.id}
             className="rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-sm border border-slate-200/60 dark:border-slate-700/60"
           >
-            {/* Row 1: date, description, amount, status */}
-            <div className="flex items-center justify-between gap-2 mb-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <span
-                  className="w-[130px] shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm inline-block"
-                  dir="ltr"
-                >
-                  {tx.date}
-                </span>
-                <span
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm truncate inline-block"
-                >
-                  {tx.description || "בית עסק"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <span
-                  className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                    tx.status === "confirmed"
-                      ? "bg-emerald-50 text-emerald-700"
-                      : "bg-amber-50 text-amber-700"
-                  }`}
-                >
-                  {tx.status === "confirmed" ? "מאושר" : "טיוטה"}
-                </span>
-                <span className={`flex items-center gap-1 font-bold text-sm whitespace-nowrap ${
-                  tx.amount < 0 ? "text-emerald-600" : "text-rose-600"
-                }`}>
-                  {tx.amount < 0 ? (
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M12 7a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L13 10.414V17a1 1 0 11-2 0v-6.586l-1.293 1.293a1 1 0 01-1.414-1.414l3-3A1 1 0 0112 7z" clipRule="evenodd" />
-                    </svg>
-                  ) : (
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M12 13a1 1 0 01-.707-.293l-3-3a1 1 0 011.414-1.414L11 9.586V3a1 1 0 112 0v6.586l1.293-1.293a1 1 0 011.414 1.414l-3 3A1 1 0 0112 13z" clipRule="evenodd" />
-                    </svg>
-                  )}
-                  {tx.amount.toLocaleString("he-IL")} ₪
-                </span>
-                <button
-                  onClick={() => onDelete(tx.id)}
-                  className="text-slate-300 hover:text-danger transition-colors p-1"
-                  aria-label="מחק עסקה"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    className="h-4 w-4"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                      clipRule="evenodd"
-                    />
+            {/* Row 1: date + source badge + business name — read-only static text (not editable) */}
+            <div className="flex items-baseline gap-2 mb-2 select-text">
+              {/* Date is wrapped in its own LTR span so the digits keep their
+                  left-to-right order even though the card is rendered RTL. */}
+              <span
+                className="shrink-0 text-xs sm:text-sm text-slate-500 dark:text-slate-400 tabular-nums cursor-default"
+                dir="ltr"
+              >
+                {tx.date}
+              </span>
+              <SourceBadge source={tx.source} />
+              <span
+                className="flex-1 min-w-0 text-sm font-medium text-slate-800 dark:text-slate-200 break-words leading-snug cursor-default pointer-events-none"
+              >
+                {tx.description || "בית עסק"}
+              </span>
+            </div>
+
+            {/* Row 2: status + amount + delete (right-aligned in RTL) */}
+            <div className="flex items-center justify-end gap-2 mb-3">
+              <span
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
+                  tx.status === "confirmed"
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-amber-50 text-amber-700"
+                }`}
+              >
+                {tx.status === "confirmed" ? "מאושר" : "טיוטה"}
+              </span>
+              <span className={`flex items-center gap-1 font-bold text-sm whitespace-nowrap tabular-nums ${
+                tx.amount < 0 ? "text-emerald-600" : "text-rose-600"
+              }`}>
+                {tx.amount < 0 ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M12 7a1 1 0 01.707.293l3 3a1 1 0 01-1.414 1.414L13 10.414V17a1 1 0 11-2 0v-6.586l-1.293 1.293a1 1 0 01-1.414-1.414l3-3A1 1 0 0112 7z" clipRule="evenodd" />
                   </svg>
-                </button>
-              </div>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M12 13a1 1 0 01-.707-.293l-3-3a1 1 0 011.414-1.414L11 9.586V3a1 1 0 112 0v6.586l1.293-1.293a1 1 0 011.414 1.414l-3 3A1 1 0 0112 13z" clipRule="evenodd" />
+                  </svg>
+                )}
+                {tx.amount.toLocaleString("he-IL")} ₪
+              </span>
+              <button
+                onClick={() => onDelete(tx.id)}
+                className="text-slate-300 hover:text-danger transition-colors p-1"
+                aria-label="מחק עסקה"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-4 w-4"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+              </button>
             </div>
 
             {/* Row 2: category + sub-category dropdowns with "add new" */}
@@ -486,10 +523,8 @@ export default function TransactionList({
         </div>
       )}
 
-      {/* ── Upload Modal ────────────────────────────────────────── */}
-      {uploadOpen && (
-        <UploadModal onClose={() => setUploadOpen(false)} billingMonth={month} billingYear={year} />
-      )}
+      {/* ── Bank Sync Modal ─────────────────────────────────────── */}
+      {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
 
       {/* ── Add Expense Modal ─────────────────────────────────── */}
       {expenseModalKind && (
@@ -502,42 +537,5 @@ export default function TransactionList({
         />
       )}
     </section>
-  );
-}
-
-// ── Upload Modal ────────────────────────────────────────────────────────
-
-function UploadModal({ onClose, billingMonth, billingYear }: { onClose: () => void; billingMonth: number; billingYear: number }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-10 pb-4 overflow-y-auto">
-      {/* Backdrop */}
-      <div
-        className="fixed inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
-      {/* Modal */}
-      <div
-        dir="rtl"
-        className="relative w-full max-w-2xl rounded-2xl bg-slate-100 dark:bg-slate-950 p-5 shadow-xl border border-slate-200/60 dark:border-slate-700/60"
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold text-slate-800 dark:text-white">
-            העלאת קובץ חיובים
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
-            aria-label="סגור"
-          >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        {/* FileUploader */}
-        <FileUploader onDone={onClose} billingMonth={billingMonth} billingYear={billingYear} />
-      </div>
-    </div>
   );
 }

@@ -1,4 +1,4 @@
-# Build from the repo root (the server reuses src/utils/classifier.ts):
+# Build from the repo root (the server reuses classifiers from src/utils):
 #   docker build -f server/Dockerfile -t takziv-server .
 
 FROM node:22-bookworm-slim AS build
@@ -8,7 +8,8 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci
 COPY server/tsconfig.json ./
 COPY server/src ./src
-COPY src/utils/classifier.ts /app/src/utils/classifier.ts
+COPY src/types/index.ts /app/src/types/index.ts
+COPY src/utils/classifier.ts src/utils/incomeClassifier.ts src/utils/bankReconciliation.ts /app/src/utils/
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim

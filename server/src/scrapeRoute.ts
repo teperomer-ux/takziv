@@ -59,24 +59,34 @@ scrapeRouter.post("/api/scrape-transactions", requireGoogleUser, async (req, res
       credentials = undefined;
     }
 
-    const userMappings = await getUserMappings(uid);
-    const { transactions, skippedPending, skippedIncome } = mapScrapedTransactions(companyId, accounts, userMappings);
+    const mappings = await getUserMappings(uid);
+    const { expenses, incomes, skippedPending, skippedCardPayments } = mapScrapedTransactions(
+      companyId,
+      accounts,
+      mappings,
+    );
 
-    let saved: number;
+    let savedExpenses: number;
+    let savedIncomes: number;
     try {
-      saved = await saveNewTransactions(uid, transactions);
+      savedExpenses = await saveNewTransactions(uid, "transactions", expenses);
+      savedIncomes = await saveNewTransactions(uid, "incomeTransactions", incomes);
     } catch (err) {
       throw new ApiError("SAVE_FAILED", { internalMessage: err instanceof Error ? err.message : String(err) });
     }
 
-    log("success", { fetched: transactions.length, saved });
+    const fetched = expenses.length + incomes.length;
+    const saved = savedExpenses + savedIncomes;
+    log("success", { fetched, saved, savedIncomes, skippedCardPayments });
     res.json({
       success: true,
       companyId,
       savedCount: saved,
-      duplicateCount: transactions.length - saved,
+      savedExpenseCount: savedExpenses,
+      savedIncomeCount: savedIncomes,
+      duplicateCount: fetched - saved,
       skippedPendingCount: skippedPending,
-      skippedIncomeCount: skippedIncome,
+      skippedCardPaymentCount: skippedCardPayments,
       accounts: accounts.map((a) => ({ accountNumber: a.accountNumber, balance: a.balance ?? null })),
     });
   } catch (err) {

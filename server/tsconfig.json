@@ -4,7 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     // rootDir is the repo root so the server can reuse the app's pure
-    // classifier (src/utils/classifier.ts) instead of duplicating its rules.
+    // classifiers and bank-statement matcher instead of duplicating them.
     "rootDir": "..",
     "outDir": "build",
     "strict": true,
@@ -12,5 +12,10 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/**/*", "../src/utils/classifier.ts"]
+  "include": [
+    "src/**/*",
+    "../src/utils/classifier.ts",
+    "../src/utils/incomeClassifier.ts",
+    "../src/utils/bankReconciliation.ts"
+  ]
 }

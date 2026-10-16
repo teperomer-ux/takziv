@@ -24,7 +24,25 @@ export interface RecurringResult {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const MAX_VARIANCE = 0.05; // 5 %
+/**
+ * Maximum month-over-month variance that still counts as the same recurring
+ * bill. We deliberately widened this beyond the old 5 % cap so genuine price
+ * creep (e.g. a 12 % gym hike, a 20 % insurance renewal) still registers as
+ * the SAME charge — otherwise the price-increase alert below could never
+ * fire, because anything past 5 % would be reclassified as "stopped".
+ * Past 50 % the row is almost certainly a different transaction entirely.
+ */
+const MAX_VARIANCE = 0.50;
+
+/**
+ * Minimum month-over-month price increase that surfaces as an alert. Below
+ * this we treat the delta as noise (CPI/index linking, mid-month billing-day
+ * shift, fractional currency rounding) and stay silent.
+ *
+ * Comparison is strict: a 10 % increase exactly does NOT alert; only > 10 %
+ * does. Decreases never alert — this is a "price creep" warning only.
+ */
+const PRICE_INCREASE_THRESHOLD = 0.10;
 
 /**
  * Descriptions (partial matches) that should never be treated as recurring.
@@ -173,15 +191,31 @@ export function calculateRecurringAndAlerts(
     if (!recurring_M1_M2) {
       // First time qualifying → NEW
       alerts.push({ kind: "new", description: desc });
-    } else if (amountM !== amountM1) {
-      // Was recurring before AND still is, but amount shifted → CHANGED
-      alerts.push({
-        kind: "amount-changed",
-        description: desc,
-        previousAmount: Math.round(amountM1!),
-        currentAmount: Math.round(amountM!),
-        diff: Math.round(amountM! - amountM1!),
-      });
+    } else {
+      // ── Price-creep gate ──────────────────────────────────────
+      // The bill was already recurring last month AND still is this
+      // month. Only emit an "amount-changed" alert when the price
+      // genuinely went UP by strictly more than PRICE_INCREASE_THRESHOLD
+      // (10 %). Anything at-or-below 10 % is treated as noise (CPI
+      // linking, billing-day shift, rounding) and stays silent — those
+      // are the false positives the user reported. Price *decreases*
+      // never alert; this is a creep warning, not a change log.
+      const previousAmount = amountM1!;
+      const currentAmount = amountM!;
+      const percentIncrease =
+        previousAmount > 0
+          ? (currentAmount - previousAmount) / previousAmount
+          : 0;
+
+      if (percentIncrease > PRICE_INCREASE_THRESHOLD) {
+        alerts.push({
+          kind: "amount-changed",
+          description: desc,
+          previousAmount: Math.round(previousAmount),
+          currentAmount: Math.round(currentAmount),
+          diff: Math.round(currentAmount - previousAmount),
+        });
+      }
     }
   }
 
