@@ -2,3 +2,9 @@ node_modules
 dist
 .env
 .env.local
+
+# Build cache
+tsconfig.tsbuildinfo
+
+# Local Claude Code settings
+.claude/
