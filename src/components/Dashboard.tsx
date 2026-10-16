@@ -16,6 +16,7 @@ import MonthlyTrend from "./MonthlyTrend";
 import CategoryBreakdown from "./CategoryBreakdown";
 import SmartSaverOnboarding from "./SmartSaverOnboarding";
 import SavingsInsightsList from "./SavingsInsightsList";
+import BankSyncModal from "./BankSyncModal";
 
 interface Props {
   transactions: Transaction[];
@@ -61,6 +62,7 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   const [incomeTransactions, setIncomeTransactions] = useState<Transaction[]>([]);
   const [activeChart, setActiveChart] = useState<"months" | "categories">("categories");
   const [smartSaverOpen, setSmartSaverOpen] = useState(false);
+  const [bankSyncOpen, setBankSyncOpen] = useState(false);
   const [hasProfile, setHasProfile] = useState(true);
   const [financialProfile, setFinancialProfile] = useState<UserFinancialProfile>({
     ...DEFAULT_FINANCIAL_PROFILE,
@@ -371,6 +373,27 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           )}
         </div>
       )}
+      {/* ── Bank / Credit Card Sync CTA ─────────────────────── */}
+      {!loadingAvg && (
+        <button
+          onClick={() => setBankSyncOpen(true)}
+          className="w-full flex items-center gap-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 px-4 py-3.5 mt-2 shadow-sm hover:shadow-md transition-all"
+        >
+          <div className="h-8 w-8 rounded-xl bg-teal-50 dark:bg-teal-900/40 flex items-center justify-center shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-teal-600" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+            </svg>
+          </div>
+          <div className="flex-1 text-start">
+            <p className="text-sm font-bold text-slate-800 dark:text-white">סנכרון חשבון בנק / אשראי</p>
+            <p className="text-[11px] text-slate-400">ייבוא עסקאות אוטומטי ישירות מהבנק או מחברת האשראי</p>
+          </div>
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-300 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+        </button>
+      )}
+
       {/* ── Smart Saver CTA ─────────────────────────────────── */}
       {!loadingAvg && (
         <button
@@ -407,6 +430,9 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           onSkip={() => setSmartSaverOpen(false)}
         />
       )}
+
+      {/* ── Bank Sync Modal ─────────────────────────────────── */}
+      {bankSyncOpen && <BankSyncModal onClose={() => setBankSyncOpen(false)} />}
     </section>
   );
 }
