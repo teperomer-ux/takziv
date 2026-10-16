@@ -6,7 +6,7 @@
   "main": "build/server/src/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node build/server/src/index.js"
+    "start": "node --env-file-if-exists=.env build/server/src/index.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
