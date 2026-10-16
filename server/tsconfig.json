@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    // rootDir is the repo root so the server can reuse the app's pure
+    // classifier (src/utils/classifier.ts) instead of duplicating its rules.
+    "rootDir": "..",
+    "outDir": "build",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "../src/utils/classifier.ts"]
+}
