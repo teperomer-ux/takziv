@@ -49,3 +49,18 @@ test("pending rows are skipped", () => {
   assert.equal(r.expenses.length, 0);
   assert.equal(r.skippedPending, 1);
 });
+
+test("each supported provider tags expenses with the app's source slug", () => {
+  const expected: [CompanyTypes, string][] = [
+    [CompanyTypes.max, "max"],
+    [CompanyTypes.isracard, "isracard"],
+    [CompanyTypes.visaCal, "cal"],
+    [CompanyTypes.hapoalim, "bank"],
+    [CompanyTypes.leumi, "bank"],
+    [CompanyTypes.discount, "bank"],
+  ];
+  for (const [company, source] of expected) {
+    const [tx] = mapScrapedTransactions(company, [account([{ description: "קפה" }])], noMappings).expenses;
+    assert.equal(tx.source, source, company);
+  }
+});

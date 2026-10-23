@@ -191,6 +191,7 @@ async function main() {
   const i = await saveNewTransactions(uid, "incomeTransactions", incomes);
   console.log(`\n✔ Saved ${e.inserted} expenses + ${i.inserted} incomes as drafts`);
   console.log(`  ${e.duplicateById + i.duplicateById} already saved by an earlier sync`);
+  console.log(`  ${e.dismissed + i.dismissed} deleted earlier in the app (not re-imported)`);
   console.log(`  ${e.duplicateByContent + i.duplicateByContent} already present from a file upload (same date + amount + business)`);
 
   // Prove the duplicate protection: re-writing the same rows must insert nothing.

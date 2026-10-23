@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { Trash2, RefreshCw, X } from "lucide-react";
+import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
+import { Trash2, RefreshCw, X, Check, Sparkles } from "lucide-react";
 import type { Transaction, TransactionSource } from "../types";
 import { useCategories } from "../hooks/useCategories";
 import { isUncategorized, byUncategorizedThenDate } from "../utils/categoryStatus";
+import { formatDate } from "../utils/formatDate";
 import { SOURCE_LABELS } from "../utils/bankReconciliation";
 import {
   onAdditionalExpensesSnapshot,
@@ -175,9 +176,28 @@ export default function TransactionList({
       ? creditCardOnly.filter((tx) => isUncategorized(tx.category))
       : creditCardOnly;
     // Copy before sorting so we never mutate the parent array.
-    // Uncategorized rows float to the top, newest date first within each group.
-    return [...base].sort(byUncategorizedThenDate);
+    // Drafts (new synced rows awaiting approval) come first, then within each
+    // group uncategorized rows float up, newest date first.
+    return [...base].sort((a, b) => {
+      const aDraft = a.status === "draft" ? 0 : 1;
+      const bDraft = b.status === "draft" ? 0 : 1;
+      return aDraft - bDraft || byUncategorizedThenDate(a, b);
+    });
   }, [creditCardOnly, filterUncategorized]);
+
+  const draftCount = useMemo(
+    () => displayedTransactions.filter((tx) => tx.status === "draft").length,
+    [displayedTransactions],
+  );
+
+  const handleConfirm = useCallback(
+    (tx: Transaction) => {
+      onUpdate(tx.id, "status", "confirmed");
+      setToast(`"${tx.description || "בית עסק"}" אושרה`);
+      setTimeout(() => setToast(null), 2500);
+    },
+    [onUpdate],
+  );
 
   if (creditCardOnly.length === 0) {
     return (
@@ -300,10 +320,31 @@ export default function TransactionList({
       )}
 
       <div className="space-y-3">
-        {displayedTransactions.map((tx) => (
+        {displayedTransactions.map((tx, idx) => {
+          const isDraft = tx.status === "draft";
+          const needsCategory = isUncategorized(tx.category);
+          return (
+          <Fragment key={tx.id}>
+          {/* ── Group headers: new drafts on top, reviewed rows below ── */}
+          {idx === 0 && isDraft && (
+            <div className="flex items-center gap-2 px-1 pt-1">
+              <Sparkles className="h-4 w-4 text-amber-500" />
+              <h3 className="text-sm font-bold text-amber-700 dark:text-amber-400">
+                תנועות חדשות לאישור ({draftCount})
+              </h3>
+            </div>
+          )}
+          {idx === draftCount && draftCount > 0 && (
+            <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 px-1 pt-3">
+              תנועות מאושרות
+            </h3>
+          )}
           <div
-            key={tx.id}
-            className="rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-sm border border-slate-200/60 dark:border-slate-700/60"
+            className={`rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-sm border ${
+              isDraft
+                ? "border-amber-300/80 dark:border-amber-700/60 ring-1 ring-amber-100 dark:ring-amber-900/30"
+                : "border-slate-200/60 dark:border-slate-700/60"
+            }`}
           >
             {/* Row 1: date + source badge + business name — read-only static text (not editable) */}
             <div className="flex items-baseline gap-2 mb-2 select-text">
@@ -313,7 +354,7 @@ export default function TransactionList({
                 className="shrink-0 text-xs sm:text-sm text-slate-500 dark:text-slate-400 tabular-nums cursor-default"
                 dir="ltr"
               >
-                {tx.date}
+                {formatDate(tx.date)}
               </span>
               <SourceBadge source={tx.source} />
               <span
@@ -326,13 +367,13 @@ export default function TransactionList({
             {/* Row 2: status + amount + delete (right-aligned in RTL) */}
             <div className="flex items-center justify-end gap-2 mb-3">
               <span
-                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  tx.status === "confirmed"
-                    ? "bg-emerald-50 text-emerald-700"
-                    : "bg-amber-50 text-amber-700"
+                className={`text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${
+                  isDraft
+                    ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                    : "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300"
                 }`}
               >
-                {tx.status === "confirmed" ? "מאושר" : "טיוטה"}
+                {isDraft ? "תנועה חדשה / טיוטה" : "מאושר"}
               </span>
               <span className={`flex items-center gap-1 font-bold text-sm whitespace-nowrap tabular-nums ${
                 tx.amount < 0 ? "text-emerald-600" : "text-rose-600"
@@ -350,21 +391,11 @@ export default function TransactionList({
               </span>
               <button
                 onClick={() => onDelete(tx.id)}
-                className="text-slate-300 hover:text-danger transition-colors p-1"
-                aria-label="מחק עסקה"
+                className="text-slate-300 hover:text-danger hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors p-1.5 rounded-lg"
+                aria-label={isDraft ? "מחק טיוטה" : "מחק עסקה"}
+                title={isDraft ? "מחק טיוטה (לא תיובא שוב בסנכרון)" : "מחק עסקה"}
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  className="h-4 w-4"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                >
-                  <path
-                    fillRule="evenodd"
-                    d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
-                    clipRule="evenodd"
-                  />
-                </svg>
+                <Trash2 className="h-4 w-4" />
               </button>
             </div>
 
@@ -481,8 +512,28 @@ export default function TransactionList({
                 )}
               </div>
             </div>
+
+            {/* Row 3 (drafts only): approve. Needs a category first so a
+                confirmed row is always fully classified. */}
+            {isDraft && (
+              <div className="flex items-center justify-end gap-2 mt-3">
+                {needsCategory && (
+                  <span className="text-[11px] text-slate-400">יש לבחור סעיף לפני אישור</span>
+                )}
+                <button
+                  onClick={() => handleConfirm(tx)}
+                  disabled={needsCategory}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-primary text-white px-4 py-2 text-xs font-semibold shadow-sm hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-40 disabled:pointer-events-none min-h-[36px]"
+                >
+                  <Check className="h-4 w-4" />
+                  אשר הוצאה
+                </button>
+              </div>
+            )}
           </div>
-        ))}
+          </Fragment>
+          );
+        })}
       </div>
 
       {/* ── Manual expenses ──────────────────────────────────────── */}

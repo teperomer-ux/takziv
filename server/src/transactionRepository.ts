@@ -33,7 +33,8 @@ export async function getUserMappings(userId: string): Promise<UserMappings> {
 
 /**
  * Inserts rows that don't exist yet into users/{uid}/{collection}, skipping
- *  - rows whose deterministic id already exists (an earlier sync), and
+ *  - rows whose deterministic id already exists (an earlier sync),
+ *  - rows the user deleted in the app (tombstoned in dismissedTransactions), and
  *  - rows matching an existing doc by date + amount + business name (e.g. an
  *    earlier CSV upload, which used random ids) — see findContentDuplicates.
  * Existing docs are never touched, so a re-sync can't overwrite categories
@@ -44,14 +45,23 @@ export async function saveNewTransactions(
   collection: TargetCollection,
   txs: MappedTransaction[],
 ): Promise<SaveResult> {
-  const col = adminDb.collection("users").doc(userId).collection(collection);
+  const userRef = adminDb.collection("users").doc(userId);
+  const col = userRef.collection(collection);
+  const dismissedCol = userRef.collection("dismissedTransactions");
 
   const missing: MappedTransaction[] = [];
+  let dismissed = 0;
   for (let i = 0; i < txs.length; i += BATCH_LIMIT) {
     const chunk = txs.slice(i, i + BATCH_LIMIT);
-    const snaps = await adminDb.getAll(...chunk.map((tx) => col.doc(tx.id)));
+    const snaps = await adminDb.getAll(
+      ...chunk.map((tx) => col.doc(tx.id)),
+      ...chunk.map((tx) => dismissedCol.doc(tx.id)),
+    );
     chunk.forEach((tx, idx) => {
-      if (!snaps[idx].exists) missing.push(tx);
+      if (snaps[idx].exists) return;
+      // Deleted by the user in the app — don't bring it back.
+      if (snaps[chunk.length + idx].exists) return void dismissed++;
+      missing.push(tx);
     });
   }
 
@@ -88,7 +98,8 @@ export async function saveNewTransactions(
 
   return {
     inserted: toInsert.length,
-    duplicateById: txs.length - missing.length,
+    duplicateById: txs.length - missing.length - dismissed,
+    dismissed,
     duplicateByContent: contentDuplicates.size,
   };
 }
@@ -97,6 +108,8 @@ export interface SaveResult {
   inserted: number;
   /** Already saved by an earlier sync (same deterministic id). */
   duplicateById: number;
+  /** Deleted earlier by the user (users/{uid}/dismissedTransactions). */
+  dismissed: number;
   /** Already present under another id, e.g. from a CSV upload. */
   duplicateByContent: number;
 }

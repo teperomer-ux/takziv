@@ -2,7 +2,6 @@ import {
   collection,
   getDocs,
   updateDoc,
-  deleteDoc,
   query,
   where,
   orderBy,
@@ -13,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { db, getUid, getUidOrNull } from "../lib/firebase";
 import type { Transaction } from "../types";
+import { deleteAndDismiss } from "./dismissedTransactionService";
 
 const COLLECTION = "transactions";
 const NOOP = () => {};
@@ -130,9 +130,9 @@ export async function updateTransaction(
   await updateDoc(ref, updates);
 }
 
-/** Delete a transaction by ID. */
+/** Delete a transaction by ID; bank sync won't re-import it. */
 export async function deleteTransaction(id: string): Promise<void> {
-  await deleteDoc(userDoc(id));
+  await deleteAndDismiss(COLLECTION, id);
 }
 
 /**
