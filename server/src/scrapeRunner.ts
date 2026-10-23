@@ -51,9 +51,10 @@ export async function runScrape(
   companyId: CompanyTypes,
   credentials: Record<string, string>,
   startDate: Date,
+  { headless = true }: { headless?: boolean } = {},
 ): Promise<ScrapedAccount[]> {
   const browser = await puppeteer.launch({
-    headless: true,
+    headless,
     args: BROWSER_ARGS,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
   });
