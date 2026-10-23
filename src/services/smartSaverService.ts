@@ -13,7 +13,6 @@ import {
   BANKS,
   CREDIT_CARDS,
   CLUBS,
-  WALLETS,
   type UserFinancialProfile,
   type FinancialOption,
 } from "../types/userProfile";
@@ -32,13 +31,6 @@ function userCol() {
 
 function userDoc(docId: string) {
   return doc(db, "users", getUid(), COLLECTION, docId);
-}
-
-export async function getSavedInsights(): Promise<SavingsInsight[]> {
-  if (!getUidOrNull()) return [];
-  const q = query(userCol(), orderBy("timestamp", "desc"));
-  const snap = await getDocs(q);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as SavingsInsight);
 }
 
 export async function saveInsights(insights: SavingsInsight[]): Promise<void> {
@@ -72,46 +64,11 @@ export function onInsightsSnapshot(
   );
 }
 
-// ── Prompt builder (for future AI API) ──────────────────────────
-
-interface ExpenseDetails {
-  amount: number;
-  category: string;
-  businessName: string;
-}
-
 function resolveNames(
   ids: string[],
   catalog: FinancialOption[],
 ): string[] {
   return ids.map((id) => catalog.find((o) => o.id === id)?.name ?? id);
-}
-
-export function generatePromptForSmartSaver(
-  expense: ExpenseDetails,
-  profile: UserFinancialProfile,
-): string {
-  const parts: string[] = [];
-
-  parts.push(
-    `The user has an expense of ${expense.amount} NIS at ${expense.businessName} (category: ${expense.category}).`,
-  );
-
-  const banks = resolveNames(profile.banks, BANKS);
-  const cards = resolveNames(profile.creditCards, CREDIT_CARDS);
-  const clubs = resolveNames(profile.consumerClubs, CLUBS);
-  const wallets = resolveNames(profile.walletsAndVouchers, WALLETS);
-
-  if (banks.length > 0) parts.push(`The user banks with: ${banks.join(", ")}.`);
-  if (cards.length > 0) parts.push(`The user has these credit cards: ${cards.join(", ")}.`);
-  if (clubs.length > 0) parts.push(`The user belongs to these consumer clubs: ${clubs.join(", ")}.`);
-  if (wallets.length > 0) parts.push(`The user uses these wallets/vouchers: ${wallets.join(", ")}.`);
-
-  parts.push(
-    "Are there any relevant discounts, cashback offers, or better plans the user should know about?",
-  );
-
-  return parts.join(" ");
 }
 
 // ── Insight generation (skill-based rules engine) ───────────────
@@ -152,7 +109,7 @@ const INSURANCE_KW = ["ביטוח", "insurance", "מנורה", "הראל", "כל
 const INTERNET_KW = ["בזק", "bezeq", "אינטרנט", "internet", "סיבים"];
 const GYM_KW = ["הולמס", "כושר", "gym", "fitness", "הפועל"];
 const SUPERMARKET_KW = [
-  "רמי לוי", "שופרסל", "ויקטורי", "יוחננוף", "מגה", "אושר ��ד",
+  "רמי לוי", "שופרסל", "ויקטורי", "יוחננוף", "מגה", "אושר עד", "דע רשוא",
   "חצי חינם", "סופר", "מרקט",
 ];
 const FASHION_KW = [

@@ -1,6 +1,5 @@
 import {
   collection,
-  addDoc,
   getDocs,
   updateDoc,
   deleteDoc,
@@ -76,14 +75,6 @@ function toFirestoreData(tx: Omit<Transaction, "id">) {
 }
 
 // ─── Write operations ───────────────────────────────────────────────────────
-
-/** Add a single transaction. Returns the generated doc ID. */
-export async function addTransaction(
-  tx: Omit<Transaction, "id">
-): Promise<string> {
-  const ref = await addDoc(userCol(), toFirestoreData(tx));
-  return ref.id;
-}
 
 /** Bulk-save transactions in atomic batch writes (auto-chunks at 500). */
 export async function bulkSaveTransactions(
@@ -191,22 +182,6 @@ export async function deleteMonthTransactions(
 export async function getAllTransactions(): Promise<Transaction[]> {
   if (!getUidOrNull()) return [];
   const q = query(userCol(), orderBy("date", "desc"));
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
-}
-
-/** Fetch all transactions for a given billing month (one-shot). */
-export async function getTransactionsByMonth(
-  year: number,
-  month: number
-): Promise<Transaction[]> {
-  const q = query(
-    userCol(),
-    where("billingYear", "==", year),
-    where("billingMonth", "==", month),
-    orderBy("date", "desc")
-  );
-
   const snapshot = await getDocs(q);
   return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
 }

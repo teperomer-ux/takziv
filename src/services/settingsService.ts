@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
 import { db, getUid, getUidOrNull } from "../lib/firebase";
 
 const DOC_ID = "global";
@@ -23,13 +23,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   partner2Income: 0,
   theme: "light",
 };
-
-export async function getSettings(): Promise<AppSettings> {
-  if (!getUidOrNull()) return { ...DEFAULT_SETTINGS };
-  const snap = await getDoc(userRef());
-  if (!snap.exists()) return { ...DEFAULT_SETTINGS };
-  return { ...DEFAULT_SETTINGS, ...snap.data() } as AppSettings;
-}
 
 export async function saveSettings(
   settings: Partial<AppSettings>

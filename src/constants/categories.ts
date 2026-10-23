@@ -112,23 +112,3 @@ export const CATEGORIES: Record<string, string[]> = {
     "דמי שכירות (הכנסה)",
   ],
 };
-
-export const CATEGORY_NAMES = Object.keys(CATEGORIES);
-
-/** Monthly budget targets (₪) per main category. */
-export const BUDGET_TARGETS: Record<string, number> = {
-  "דיור": 5000,
-  "תקשורת": 350,
-  "תחבורה": 1500,
-  "חינוך": 1200,
-  "מזון וטיפוח": 3500,
-  "ביגוד והנעלה": 500,
-  "פנאי ובידור": 1200,
-  "בריאות": 800,
-  "מתנות ותרומות": 300,
-  "עמלות ודמי ניהול": 200,
-  "החזר הלוואות": 2000,
-  "חסכונות": 2000,
-  "מיסים": 1500,
-  "שונות": 500,
-};

@@ -170,5 +170,3 @@ export function suggestCategory(
   };
 }
 
-/** @deprecated Use suggestCategory instead */
-export const classify = suggestCategory;

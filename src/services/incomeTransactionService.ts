@@ -1,6 +1,5 @@
 import {
   collection,
-  addDoc,
   getDocs,
   updateDoc,
   deleteDoc,
@@ -61,13 +60,6 @@ function toFirestoreData(tx: Omit<Transaction, "id">) {
 
 // ─── Write operations ───────────────────────────────────────────────────────
 
-export async function addIncomeTransaction(
-  tx: Omit<Transaction, "id">
-): Promise<string> {
-  const ref = await addDoc(userCol(), toFirestoreData(tx));
-  return ref.id;
-}
-
 export async function bulkSaveIncomeTransactions(
   txs: Omit<Transaction, "id">[]
 ): Promise<void> {
@@ -125,15 +117,6 @@ export async function deleteMonthIncomeTransactions(
   }
 
   return snapshot.docs.length;
-}
-
-// ─── Read operations ────────────────────────────────────────────────────────
-
-export async function getAllIncomeTransactions(): Promise<Transaction[]> {
-  if (!getUidOrNull()) return [];
-  const q = query(userCol(), orderBy("date", "desc"));
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
 }
 
 // ─── Real-time listener ─────────────────────────────────────────────────────

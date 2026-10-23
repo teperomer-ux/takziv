@@ -23,11 +23,6 @@ function userDoc(docId: string) {
   return doc(db, "users", getUid(), COLLECTION, docId);
 }
 
-export interface CategoryDoc {
-  name: string;
-  subCategories: string[];
-}
-
 /**
  * Fetch all categories from Firestore (one-shot).
  * Returns a Record<string, string[]> matching the shape of the static CATEGORIES.
