@@ -5,3 +5,7 @@ dist
 
 # Build cache
 *.tsbuildinfo
+
+# Service-account keys (never commit)
+*-firebase-adminsdk-*.json
+service-account*.json
