@@ -9,3 +9,6 @@ dist
 # Service-account keys (never commit)
 *-firebase-adminsdk-*.json
 service-account*.json
+
+# Server compiled output
+server/build/
