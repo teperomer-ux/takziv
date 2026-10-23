@@ -1,40 +1,31 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /transactions/{docId} {
-      // TODO: restrict to authenticated users once auth is added
-      // allow read, write: if request.auth != null;
-      allow read, write: if true;
+
+    function signedIn() {
+      return request.auth != null;
     }
-    // Legacy global collection — deny all access (data now lives under users/{uid})
-    match /learnedMappings/{docId} {
-      allow read, write: if false;
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
     }
-    // Per-user learned mappings — only the owning user can read/write
-    match /users/{userId}/learnedMappings/{docId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+    // ─── Per-user data ────────────────────────────────────────────────────
+    // users/{uid} and everything beneath it (transactions, incomeTransactions,
+    // categories, incomeCategories, additionalExpenses, pinnedBills,
+    // learnedMappings, learnedIncomeMappings, uploaded_files, settings,
+    // savingsInsights, …) is readable and writable only by its owner.
+    match /users/{uid} {
+      allow read, write: if isOwner(uid);
+
+      match /{document=**} {
+        allow read, write: if isOwner(uid);
+      }
     }
-    // Per-user learned income mappings
-    match /users/{userId}/learnedIncomeMappings/{docId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-    }
-    match /uploaded_files/{docId} {
-      allow read, write: if true;
-    }
-    match /additionalExpenses/{docId} {
-      allow read, write: if true;
-    }
-    match /incomeTransactions/{docId} {
-      allow read, write: if true;
-    }
-    match /incomeCategories/{docId} {
-      allow read, write: if true;
-    }
-    match /categories/{docId} {
-      allow read, write: if true;
-    }
-    match /pinnedBills/{docId} {
-      allow read, write: if true;
-    }
+
+    // Everything else — including the legacy top-level collections written
+    // before per-user storage existed (transactions, categories, pinnedBills,
+    // learnedMappings, …) — is denied by default. The server-side bank sync
+    // uses the Admin SDK, which bypasses these rules.
   }
 }

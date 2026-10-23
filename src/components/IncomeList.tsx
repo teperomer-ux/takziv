@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { Trash2, Upload, X } from "lucide-react";
+import { Trash2, RefreshCw } from "lucide-react";
 import type { Transaction } from "../types";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
-import IncomeUploader from "./IncomeUploader";
+import BankSyncModal from "./BankSyncModal";
 
 const MONTH_NAMES = [
   "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
@@ -10,23 +10,37 @@ const MONTH_NAMES = [
 ];
 
 interface Props {
+  /** Incomes only — lives in its own Firestore collection. */
   transactions: Transaction[];
+  /**
+   * Direct bank (עו״ש) EXPENSES for the month — mortgage, fees, standing
+   * orders, cash withdrawals, etc. They live in the shared transactions
+   * collection (same as CC rows) but are filtered to this view so the CC
+   * tab and the עו״ש tab don't double-list them.
+   */
+  bankTransactions: Transaction[];
   year: number;
   month: number;
   onUpdate: (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
   onDelete: (id: string) => void;
   onDeleteAll: () => Promise<number>;
+  /** Delete a bank-side transaction. Bank rows live in the main transactions
+   *  collection alongside CC rows, so this handler is the same one
+   *  TransactionList uses — not the income-collection delete. */
+  onBankDelete: (id: string) => void;
 }
 
 const ADD_NEW = "__add_new__";
 
 export default function IncomeList({
   transactions,
+  bankTransactions,
   year,
   month,
   onUpdate,
   onDelete,
   onDeleteAll,
+  onBankDelete,
 }: Props) {
   const { categories, categoryNames, addCategory, addSubCategory } = useIncomeCategories();
 
@@ -38,7 +52,7 @@ export default function IncomeList({
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [uploadOpen, setUploadOpen] = useState(false);
+  const [syncOpen, setSyncOpen] = useState(false);
 
   async function handleAddCategory(txId: string) {
     const trimmed = newCatName.trim();
@@ -77,22 +91,23 @@ export default function IncomeList({
 
   const monthLabel = `${MONTH_NAMES[month - 1]} ${year}`;
 
-  if (transactions.length === 0) {
+  // Empty state only when the whole עו״ש tab has nothing — no incomes AND no
+  // direct bank expenses. Otherwise we fall through and render whatever side
+  // has data (e.g. mortgage-only months with no incoming salary yet).
+  if (transactions.length === 0 && bankTransactions.length === 0) {
     return (
       <>
         <div className="rounded-2xl bg-white dark:bg-slate-900 p-8 text-center border border-slate-200/60 dark:border-slate-700/60">
-          <p className="text-slate-400 mb-4">אין הכנסות להצגה.</p>
+          <p className="text-slate-400 mb-4">אין נתוני עו״ש להצגה.</p>
           <button
-            onClick={() => setUploadOpen(true)}
+            onClick={() => setSyncOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 text-white px-5 py-2.5 text-sm font-semibold shadow-sm hover:bg-emerald-700 transition-colors min-h-[44px]"
           >
-            <Upload className="h-4 w-4" />
-            העלאת דף עו״ש
+            <RefreshCw className="h-4 w-4" />
+            סנכרון חשבון בנק / אשראי
           </button>
         </div>
-        {uploadOpen && (
-          <IncomeUploadModal year={year} month={month} onClose={() => setUploadOpen(false)} />
-        )}
+        {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
       </>
     );
   }
@@ -114,13 +129,13 @@ export default function IncomeList({
 
         <div className="flex items-center gap-1">
           <button
-            onClick={() => setUploadOpen(true)}
+            onClick={() => setSyncOpen(true)}
             className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-emerald-600 transition-colors p-2.5 rounded-xl hover:bg-emerald-50"
-            aria-label="העלאת דף עו״ש"
-            title="העלאת דף עו״ש"
+            aria-label="סנכרון חשבון בנק / אשראי"
+            title="סנכרון חשבון בנק / אשראי"
           >
-            <Upload className="h-4 w-4" />
-            <span className="hidden sm:inline">העלאת קובץ</span>
+            <RefreshCw className="h-4 w-4" />
+            <span className="hidden sm:inline">סנכרון</span>
           </button>
 
           {confirmDeleteAll ? (
@@ -309,40 +324,95 @@ export default function IncomeList({
         ))}
       </div>
 
-      {/* Upload Modal */}
-      {uploadOpen && (
-        <IncomeUploadModal year={year} month={month} onClose={() => setUploadOpen(false)} />
+      {/* ── Bank-side expenses (עו״ש debits that aren't CC bill payments) ── */}
+      {bankTransactions.length > 0 && (
+        <BankExpensesSection
+          transactions={bankTransactions}
+          monthLabel={monthLabel}
+          onDelete={onBankDelete}
+        />
       )}
+
+      {/* Bank Sync Modal */}
+      {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
     </section>
   );
 }
 
-// ── Upload Modal ────────────────────────────────────────────────────────
+// ─── Bank-expenses section ───────────────────────────────────────────────────
+// Lists every עו״ש debit row for the month — mortgage, fees, standing orders,
+// cash withdrawals — strictly the rows whose `source === "bank"` and which
+// passed the CC-bill filter in the parser. Renders below the incomes on the
+// "עובר ושב" tab so all bank-side activity lives in one place. CC purchases
+// never appear here; they have their own tab.
 
-function IncomeUploadModal({ year, month, onClose }: { year: number; month: number; onClose: () => void }) {
+interface BankExpensesSectionProps {
+  transactions: Transaction[];
+  monthLabel: string;
+  onDelete: (id: string) => void;
+}
+
+function BankExpensesSection({
+  transactions,
+  monthLabel,
+  onDelete,
+}: BankExpensesSectionProps) {
+  const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
+  const total = sorted.reduce((s, tx) => s + tx.amount, 0);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center px-4 pt-10 pb-4 overflow-y-auto">
-      <div
-        className="fixed inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
-      />
-      <div
-        dir="rtl"
-        className="relative w-full max-w-2xl rounded-2xl bg-slate-100 dark:bg-slate-950 p-5 shadow-xl border border-slate-200/60 dark:border-slate-700/60"
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold text-slate-800 dark:text-white">
-            העלאת דף עו״ש — הכנסות
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-2 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors"
-            aria-label="סגור"
+    <div className="mt-6">
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h3 className="text-sm font-bold text-rose-700 dark:text-rose-400">
+          הוצאות מהבנק — {monthLabel} ({sorted.length})
+        </h3>
+        <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 tabular-nums" dir="ltr">
+          {total.toLocaleString("he-IL")} ₪
+        </span>
+      </div>
+
+      <div className="space-y-3">
+        {sorted.map((tx) => (
+          <div
+            key={tx.id}
+            className="rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-sm border border-rose-200/60 dark:border-rose-900/40"
           >
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-        <IncomeUploader year={year} month={month} onDone={onClose} />
+            <div className="flex items-baseline gap-2 mb-2 select-text">
+              <span
+                className="shrink-0 text-xs sm:text-sm text-slate-500 dark:text-slate-400 tabular-nums"
+                dir="ltr"
+              >
+                {tx.date}
+              </span>
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                בנק
+              </span>
+              <span className="flex-1 min-w-0 text-sm font-medium text-slate-800 dark:text-slate-200 break-words leading-snug">
+                {tx.description || "—"}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
+                {tx.category || "ללא סעיף"}{tx.subCategory ? ` · ${tx.subCategory}` : ""}
+              </p>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="font-bold text-sm text-rose-600 tabular-nums" dir="ltr">
+                  −{tx.amount.toLocaleString("he-IL")} ₪
+                </span>
+                <button
+                  onClick={() => onDelete(tx.id)}
+                  className="text-slate-300 hover:text-danger transition-colors p-1"
+                  aria-label="מחק הוצאה מהבנק"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

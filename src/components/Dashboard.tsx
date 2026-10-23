@@ -3,6 +3,7 @@ import type { Transaction } from "../types";
 import { getAllTransactions } from "../services/transactionService";
 import { onIncomeTransactionsSnapshot } from "../services/incomeTransactionService";
 import { calculateRecurringAndAlerts } from "../utils/recurringBills";
+import { matchCreditCardCompany } from "../utils/bankReconciliation";
 import {
   onAdditionalExpensesSnapshot,
   expenseTotalForMonth,
@@ -16,6 +17,7 @@ import MonthlyTrend from "./MonthlyTrend";
 import CategoryBreakdown from "./CategoryBreakdown";
 import SmartSaverOnboarding from "./SmartSaverOnboarding";
 import SavingsInsightsList from "./SavingsInsightsList";
+import BankSyncModal from "./BankSyncModal";
 
 interface Props {
   transactions: Transaction[];
@@ -29,12 +31,80 @@ const MONTH_NAMES = [
   "יולי", "אוגוסט", "ספטמבר", "אוקטובר", "נובמבר", "דצמבר",
 ];
 
+/**
+ * The income category — excluded from every expense aggregation in this file.
+ */
+const INCOME_CATEGORY = "מקורות הכנסה";
+
+/** Result of `aggregateBudgetSpending` — what the progress bars read from. */
+interface BudgetAggregation {
+  /** Total amount per category for the month (categorised rows only). */
+  spending: Map<string, number>;
+  /** Sum across all categories — drives the global progress bar. */
+  totalSpent: number;
+  /** Rows that have no category yet; surfaced as the "לסיווג" CTA. */
+  uncategorizedCount: number;
+}
+
+/**
+ * Aggregate the budget/category progress bars for the active month.
+ *
+ * Inputs include rows from EVERY source — credit-card files (max | isracard |
+ * cal) AND direct עו״ש imports (source === "bank") — so mortgage, fees, cash
+ * withdrawals and standing orders all count toward their categories alongside
+ * card purchases.
+ *
+ * Double-counting safety net: if a bank row happens to describe a monthly
+ * credit-card bill payment ("חיוב מקס", "ישראכרט חיוב", "כאל", "MAX", etc.),
+ * we DROP it. The individual purchases on that card are already in the same
+ * transactions array as detailed CC rows; counting the aggregate bank deduction
+ * on top would double-count the entire CC bill. `matchCreditCardCompany`
+ * returns the provider slug for any description that looks like such a
+ * payment, or null when it's a normal bank expense.
+ *
+ * Income rows and blank-category rows are excluded — income is its own card,
+ * and uncategorised rows are surfaced separately so the user can sort them.
+ */
+function aggregateBudgetSpending(transactions: Transaction[]): BudgetAggregation {
+  const spending = new Map<string, number>();
+  let totalSpent = 0;
+  let uncategorizedCount = 0;
+
+  for (const tx of transactions) {
+    // Income lives in its own collection — never count it as spending.
+    if (tx.category === INCOME_CATEGORY) continue;
+
+    // Defensive de-duplication: a bank row whose description matches a known
+    // CC bill keyword is the lump-sum statement payment. The individual
+    // purchases that made up that lump sum are already in `transactions` as
+    // their own tagged CC rows, so this row would double-count if added.
+    if (tx.source === "bank" && matchCreditCardCompany(tx.description)) {
+      continue;
+    }
+
+    if (!tx.category) {
+      uncategorizedCount++;
+      continue;
+    }
+
+    spending.set(tx.category, (spending.get(tx.category) ?? 0) + tx.amount);
+    totalSpent += tx.amount;
+  }
+
+  return { spending, totalSpent, uncategorizedCount };
+}
+
 /** Compute per-category monthly averages from all historical transactions. */
 function computeAverages(allTxs: Transaction[]): Map<string, number> {
   const catMonths = new Map<string, Map<string, number>>();
 
   for (const tx of allTxs) {
-    if (tx.category === "מקורות הכנסה" || !tx.category) continue;
+    if (tx.category === INCOME_CATEGORY || !tx.category) continue;
+    // Mirror the budget aggregator's safety net: bank-side CC bill rows are
+    // the lump-sum statement payment, not real category spending. Including
+    // them here would inflate the historical average for whichever category
+    // the user tagged the bank row with.
+    if (tx.source === "bank" && matchCreditCardCompany(tx.description)) continue;
     const monthKey = tx.date.slice(0, 7);
 
     let months = catMonths.get(tx.category);
@@ -61,6 +131,7 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   const [incomeTransactions, setIncomeTransactions] = useState<Transaction[]>([]);
   const [activeChart, setActiveChart] = useState<"months" | "categories">("categories");
   const [smartSaverOpen, setSmartSaverOpen] = useState(false);
+  const [bankSyncOpen, setBankSyncOpen] = useState(false);
   const [hasProfile, setHasProfile] = useState(true);
   const [financialProfile, setFinancialProfile] = useState<UserFinancialProfile>({
     ...DEFAULT_FINANCIAL_PROFILE,
@@ -136,23 +207,17 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
     [allTxs, year, month],
   );
 
-  // Aggregate current month spending per category (exclude income)
-  const spending = new Map<string, number>();
-  let totalSpent = 0;
-  let uncategorizedCount = 0;
-
-  for (const tx of transactions) {
-    if (tx.category === "מקורות הכנסה") continue;
-    if (!tx.category) {
-      uncategorizedCount++;
-      continue;
-    }
-    spending.set(tx.category, (spending.get(tx.category) ?? 0) + tx.amount);
-    totalSpent += tx.amount;
-  }
-
-  // Include manually-added expenses in total
-  totalSpent += extraExpense;
+  // Aggregate current-month spending per category — includes both detailed
+  // credit-card rows and direct bank (עו״ש) rows, and defensively skips any
+  // bank row that represents the lump-sum CC bill payment (those would
+  // double-count the individual card purchases already in `transactions`).
+  const { spending, totalSpent: txTotal, uncategorizedCount } = useMemo(
+    () => aggregateBudgetSpending(transactions),
+    [transactions],
+  );
+  // Manually-added (one-off / recurring) expenses are kept in their own
+  // collection and added on top of the transaction-driven total.
+  const totalSpent = txTotal + extraExpense;
 
   // Total average = sum of all category averages (for summary card)
   let totalAvg = 0;
@@ -371,6 +436,27 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           )}
         </div>
       )}
+      {/* ── Bank / Credit Card Sync CTA ─────────────────────── */}
+      {!loadingAvg && (
+        <button
+          onClick={() => setBankSyncOpen(true)}
+          className="w-full flex items-center gap-3 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 px-4 py-3.5 mt-2 shadow-sm hover:shadow-md transition-all"
+        >
+          <div className="h-8 w-8 rounded-xl bg-teal-50 dark:bg-teal-900/40 flex items-center justify-center shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-teal-600" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+            </svg>
+          </div>
+          <div className="flex-1 text-start">
+            <p className="text-sm font-bold text-slate-800 dark:text-white">סנכרון חשבון בנק / אשראי</p>
+            <p className="text-[11px] text-slate-400">ייבוא עסקאות אוטומטי ישירות מהבנק או מחברת האשראי</p>
+          </div>
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-slate-300 shrink-0" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+          </svg>
+        </button>
+      )}
+
       {/* ── Smart Saver CTA ─────────────────────────────────── */}
       {!loadingAvg && (
         <button
@@ -407,6 +493,9 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           onSkip={() => setSmartSaverOpen(false)}
         />
       )}
+
+      {/* ── Bank Sync Modal ─────────────────────────────────── */}
+      {bankSyncOpen && <BankSyncModal onClose={() => setBankSyncOpen(false)} />}
     </section>
   );
 }

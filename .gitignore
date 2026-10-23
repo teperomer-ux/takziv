@@ -12,3 +12,6 @@ service-account*.json
 
 # Server compiled output
 server/build/
+
+# Local Claude Code settings
+.claude/settings.local.json

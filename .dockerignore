@@ -1,0 +1,10 @@
+**/node_modules
+**/build
+dist
+.git
+.claude
+.env
+.env.*
+server/.env
+server/*-firebase-adminsdk-*.json
+server/service-account*.json

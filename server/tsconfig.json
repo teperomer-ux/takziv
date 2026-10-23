@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    // rootDir is the repo root so the server can reuse the app's pure
+    // classifiers and bank-statement matcher instead of duplicating them.
+    "rootDir": "..",
+    "outDir": "build",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": [
+    "src/**/*",
+    "../src/utils/classifier.ts",
+    "../src/utils/incomeClassifier.ts",
+    "../src/utils/bankReconciliation.ts"
+  ]
+}

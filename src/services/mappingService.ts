@@ -3,6 +3,7 @@ import {
   doc,
   getDocs,
   writeBatch,
+  setDoc,
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
 
@@ -27,6 +28,26 @@ function toDocId(description: string): string {
     .replace(/[/\\.\s]+/g, "_")   // chars illegal in doc IDs → underscore
     .replace(/_{2,}/g, "_")        // collapse runs
     .slice(0, 120);                // Firestore IDs ≤ 1500 bytes; 120 chars is safe
+}
+
+/**
+ * Save (or update) a single learned mapping for a specific user.
+ * Uses the sanitised description as the document ID → upsert semantics.
+ */
+export async function saveMapping(
+  userId: string,
+  description: string,
+  category: string,
+  subCategory: string,
+  colName: string = COLLECTION
+): Promise<void> {
+  const id = toDocId(description);
+  if (!id) return;
+  await setDoc(doc(db, "users", userId, colName, id), {
+    description: description.trim(),
+    category,
+    subCategory,
+  });
 }
 
 /**

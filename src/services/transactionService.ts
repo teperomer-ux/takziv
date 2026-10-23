@@ -37,6 +37,22 @@ function deriveBilling(tx: { date: string; billingMonth?: number; billingYear?: 
   return { billingMonth: m || 1, billingYear: y || new Date().getFullYear() };
 }
 
+/** Accept only the four canonical source slugs; anything else (incl. the
+ *  legacy "credit-card" string written before provider-level tagging) maps to
+ *  undefined so the rest of the app treats those rows as untagged CC. */
+const VALID_SOURCES: ReadonlySet<NonNullable<Transaction["source"]>> = new Set([
+  "max",
+  "isracard",
+  "cal",
+  "bank",
+]);
+function normalizeSource(raw: unknown): Transaction["source"] {
+  if (typeof raw !== "string") return undefined;
+  return VALID_SOURCES.has(raw as NonNullable<Transaction["source"]>)
+    ? (raw as Transaction["source"])
+    : undefined;
+}
+
 function docToTransaction(
   id: string,
   data: Record<string, unknown>
@@ -54,6 +70,7 @@ function docToTransaction(
     status: (data.status as Transaction["status"]) ?? "draft",
     billingMonth: (data.billingMonth as number) ?? fallbackM,
     billingYear: (data.billingYear as number) ?? fallbackY,
+    source: normalizeSource(data.source),
   };
 }
 
@@ -62,7 +79,9 @@ function toFirestoreData(tx: Omit<Transaction, "id">) {
   // Guard against Invalid Date — fall back to today rather than crashing the batch
   const safeDate = isNaN(parsed.getTime()) ? new Date() : parsed;
   const billing = deriveBilling(tx);
-  return {
+  const source = normalizeSource(tx.source);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const out: Record<string, any> = {
     date: Timestamp.fromDate(safeDate),
     description: tx.description,
     amount: tx.amount,
@@ -72,6 +91,10 @@ function toFirestoreData(tx: Omit<Transaction, "id">) {
     billingMonth: billing.billingMonth,
     billingYear: billing.billingYear,
   };
+  // Only write source when the caller actually tagged the row. Firestore
+  // rejects `undefined`, so we omit the field for legacy/untyped writes.
+  if (source) out.source = source;
+  return out;
 }
 
 // ─── Write operations ───────────────────────────────────────────────────────
