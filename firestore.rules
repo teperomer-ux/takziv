@@ -18,9 +18,24 @@ service cloud.firestore {
     match /users/{uid} {
       allow read, write: if isOwner(uid);
 
-      match /{document=**} {
-        allow read, write: if isOwner(uid);
+      // Rules OR together, so bankConnections must be excluded here rather
+      // than restricted in its own block.
+      match /{subcollection}/{document=**} {
+        allow read, write: if isOwner(uid) && subcollection != "bankConnections";
       }
+
+      // Sync status of saved bank connections. Written only by the server
+      // (Admin SDK); the owner may read it but never edit it, so the client
+      // can't flip a disabled connection back to active.
+      match /bankConnections/{connectionId} {
+        allow read: if isOwner(uid);
+      }
+    }
+
+    // Encrypted bank credentials. No client — not even the owner — may read,
+    // list or write them; only the Admin SDK (which bypasses rules) can.
+    match /bankSecrets/{connectionId} {
+      allow read, write: if false;
     }
 
     // Everything else — including the legacy top-level collections written

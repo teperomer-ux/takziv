@@ -6,9 +6,11 @@
   "main": "build/server/src/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node --env-file-if-exists=.env build/server/src/index.js"
+    "start": "node --env-file-if-exists=.env build/server/src/index.js",
+    "test": "tsc && node --test \"build/server/test/**/*.test.js\""
   },
   "dependencies": {
+    "@google-cloud/kms": "^6.3.0",
     "cors": "^2.8.6",
     "express": "^5.3.0",
     "firebase-admin": "^14.5.0",

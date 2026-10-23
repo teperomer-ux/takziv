@@ -14,6 +14,7 @@
   },
   "include": [
     "src/**/*",
+    "test/**/*",
     "../src/utils/classifier.ts",
     "../src/utils/incomeClassifier.ts",
     "../src/utils/bankReconciliation.ts"
