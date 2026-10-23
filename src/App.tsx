@@ -1,16 +1,19 @@
 import { useState, useMemo, useRef, useCallback } from "react";
-import { Settings, LogOut } from "lucide-react";
+import { Settings, LogOut, Loader2, X } from "lucide-react";
 import BottomNav, { type Tab } from "./components/BottomNav";
 import Dashboard from "./components/Dashboard";
 import TransactionList from "./components/TransactionList";
 import IncomeList from "./components/IncomeList";
 import SettingsModal from "./components/SettingsModal";
+import BankSyncModal from "./components/BankSyncModal";
 import Login from "./components/Login";
 import { useTransactions } from "./hooks/useTransactions";
 import { useIncomeTransactions } from "./hooks/useIncomeTransactions";
 import { CategoriesContext, useCategoriesProvider } from "./hooks/useCategories";
 import { IncomeCategoriesContext, useIncomeCategoriesProvider } from "./hooks/useIncomeCategories";
 import { SettingsContext, useSettingsProvider } from "./hooks/useSettings";
+import { BankSyncContext, useBankSyncProvider } from "./hooks/useBankSync";
+import { institutionLabel } from "./constants/institutions";
 import { useAuth } from "./hooks/useAuth";
 import { getUidOrNull } from "./lib/firebase";
 import { saveMapping } from "./services/mappingService";
@@ -115,6 +118,8 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
   const categoriesCtx = useCategoriesProvider();
   const incomeCategoriesCtx = useIncomeCategoriesProvider();
   const settingsCtx = useSettingsProvider();
+  const bankSync = useBankSyncProvider(settingsCtx.settings, settingsCtx.loading);
+  const syncingConnection = bankSync.connections.find((c) => c.id === bankSync.syncingId);
 
   function prevMonth() {
     if (month === 1) { setMonth(year - 1, 12); incomeTx.setMonth(year - 1, 12); }
@@ -133,6 +138,7 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
 
   return (
     <SettingsContext.Provider value={settingsCtx}>
+    <BankSyncContext.Provider value={bankSync}>
     <CategoriesContext.Provider value={categoriesCtx}>
     <IncomeCategoriesContext.Provider value={incomeCategoriesCtx}>
     <div dir="rtl" className="min-h-screen bg-slate-100 dark:bg-slate-950 font-heebo pb-24 transition-colors">
@@ -143,6 +149,19 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
             <h1 className="text-xl font-bold tracking-wide">תקציב</h1>
             <p className="text-[11px] text-white/60 mt-0.5">ניהול הוצאות חכם</p>
           </div>
+          {/* Background sync indicator — subtle, never blocks the screen */}
+          {syncingConnection && (
+            <button
+              onClick={bankSync.openModal}
+              className="absolute end-0 flex items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-[11px] text-white/85 hover:bg-white/15 transition-colors"
+              role="status"
+              aria-live="polite"
+              title="סנכרון ברקע"
+            >
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span className="hidden sm:inline">מסנכרן את {institutionLabel(syncingConnection.companyId)}…</span>
+            </button>
+          )}
           <div className="absolute start-0 flex items-center gap-0.5">
             <button
               onClick={() => setSettingsOpen(true)}
@@ -191,6 +210,37 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
             </svg>
           </button>
         </div>
+
+        {/* Bank sync notice (background result / needs attention) */}
+        {bankSync.notice && (
+          <div
+            role={bankSync.notice.kind === "success" ? "status" : "alert"}
+            className={`mb-4 flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm ${
+              bankSync.notice.kind === "success"
+                ? "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200/70 dark:border-emerald-800/40 text-emerald-800 dark:text-emerald-300"
+                : bankSync.notice.kind === "attention"
+                  ? "bg-amber-50 dark:bg-amber-950/30 border-amber-200/70 dark:border-amber-800/40 text-amber-800 dark:text-amber-300"
+                  : "bg-red-50 dark:bg-red-950/40 border-red-200 dark:border-red-800/40 text-red-700 dark:text-red-400"
+            }`}
+          >
+            <p className="flex-1 leading-relaxed">{bankSync.notice.text}</p>
+            {bankSync.notice.kind === "attention" && (
+              <button
+                onClick={() => { bankSync.dismissNotice(); bankSync.openModal(); }}
+                className="shrink-0 rounded-lg bg-amber-500 text-white px-3 py-1.5 text-xs font-semibold hover:bg-amber-600 transition-colors"
+              >
+                טיפול
+              </button>
+            )}
+            <button
+              onClick={bankSync.dismissNotice}
+              className="shrink-0 p-1 rounded-lg opacity-60 hover:opacity-100 transition-opacity"
+              aria-label="סגור הודעה"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
 
         {/* Error banner */}
         {error && (
@@ -247,9 +297,13 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
 
       {/* ── Settings Modal ────────────────────────────────────── */}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* ── Bank sync modal opened from the header / notices ──── */}
+      {bankSync.modalOpen && <BankSyncModal onClose={bankSync.closeModal} />}
     </div>
     </IncomeCategoriesContext.Provider>
     </CategoriesContext.Provider>
+    </BankSyncContext.Provider>
     </SettingsContext.Provider>
   );
 }

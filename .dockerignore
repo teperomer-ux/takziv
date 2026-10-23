@@ -8,3 +8,4 @@ dist
 server/.env
 server/*-firebase-adminsdk-*.json
 server/service-account*.json
+server/.secrets

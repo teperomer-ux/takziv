@@ -20,6 +20,9 @@ export const API_ERRORS = {
   BANK_TIMEOUT: [504, "The bank did not respond in time"],
   BANK_ERROR: [502, "The bank site returned an unexpected error"],
   SAVE_FAILED: [500, "Transactions were fetched but could not be saved"],
+  CONNECTION_NOT_FOUND: [404, "No such saved connection"],
+  CONNECTION_NEEDS_ATTENTION: [409, "This connection needs new login details before it can sync again"],
+  CREDENTIAL_STORE_UNAVAILABLE: [500, "The server cannot store credentials right now"],
   INTERNAL_ERROR: [500, "Unexpected server error"],
 } as const satisfies Record<string, readonly [number, string]>;
 

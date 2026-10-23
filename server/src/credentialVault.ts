@@ -53,6 +53,29 @@ export function kmsKeyWrapper(keyName: string, client = new KeyManagementService
   };
 }
 
+/**
+ * Wraps data keys with a local 256-bit key (AES-256-GCM), for running without
+ * Cloud KMS. The key never leaves this machine, so the stored records are
+ * unreadable without it — but anyone with both the key file and Firestore
+ * access can decrypt, which KMS's separate IAM boundary would prevent.
+ */
+export function localKeyWrapper(key: Buffer): KeyWrapper {
+  if (key.length !== 32) throw new CredentialVaultError("Local key must be 32 bytes");
+  return {
+    async wrap(plaintext, aad) {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv("aes-256-gcm", key, iv).setAAD(aad);
+      const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+      return Buffer.concat([iv, cipher.getAuthTag(), body]);
+    },
+    async unwrap(ciphertext, aad) {
+      const decipher = createDecipheriv("aes-256-gcm", key, ciphertext.subarray(0, 12), { authTagLength: 16 });
+      decipher.setAAD(aad).setAuthTag(ciphertext.subarray(12, 28));
+      return Buffer.concat([decipher.update(ciphertext.subarray(28)), decipher.final()]);
+    },
+  };
+}
+
 function aadFor(uid: string, connectionId: string) {
   if (!uid || !connectionId) throw new CredentialVaultError("uid and connectionId are required");
   return Buffer.from(`takziv:bank-credentials:v${ENVELOPE_VERSION}:${uid}:${connectionId}`, "utf8");

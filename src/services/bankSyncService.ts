@@ -16,6 +16,9 @@ export type BankSyncErrorCode =
   | "BANK_TIMEOUT"
   | "BANK_ERROR"
   | "SAVE_FAILED"
+  | "CONNECTION_NOT_FOUND"
+  | "CONNECTION_NEEDS_ATTENTION"
+  | "CREDENTIAL_STORE_UNAVAILABLE"
   | "INTERNAL_ERROR"
   | "NETWORK_ERROR";
 
@@ -31,6 +34,23 @@ export interface BankSyncResult {
   accounts: { accountNumber: string; balance: number | null }[];
 }
 
+/** A saved connection as the server reports it — never includes credentials. */
+export interface BankConnection {
+  id: string;
+  companyId: string;
+  /** "needs_attention": the bank rejected the login / wants OTP or a password change. */
+  status: "active" | "needs_attention";
+  /** e.g. "•••789" */
+  maskedLogin: string;
+  lastErrorCode: string | null;
+  /** ISO timestamp */
+  lastSyncAt: string | null;
+}
+
+export interface ConnectionSyncResult extends BankSyncResult {
+  connection: BankConnection;
+}
+
 export class BankSyncError extends Error {
   constructor(
     public readonly code: BankSyncErrorCode,
@@ -41,27 +61,20 @@ export class BankSyncError extends Error {
   }
 }
 
-/**
- * Logs in to the bank / card company on the server, imports the transactions
- * into users/{uid}/transactions and returns how many were added. Credentials
- * are sent once over HTTPS and are not stored anywhere — don't keep them in
- * component state longer than the form submit.
- */
-export async function syncBankTransactions(
-  companyId: string,
-  credentials: Record<string, string>,
-  startDate: string,
-): Promise<BankSyncResult> {
+async function apiRequest<T>(method: "GET" | "POST" | "DELETE", path: string, payload?: unknown): Promise<T> {
   const user = auth.currentUser;
   if (!user) throw new BankSyncError("UNAUTHENTICATED", "Not signed in");
   const token = await user.getIdToken();
 
   let res: Response;
   try {
-    res = await fetch(`${API_BASE_URL}/api/scrape-transactions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ companyId, credentials, startDate }),
+    res = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(payload !== undefined && { "Content-Type": "application/json" }),
+      },
+      body: payload !== undefined ? JSON.stringify(payload) : undefined,
     });
   } catch {
     throw new BankSyncError("NETWORK_ERROR", "Could not reach the sync server");
@@ -72,5 +85,44 @@ export async function syncBankTransactions(
     const err = body?.error;
     throw new BankSyncError(err?.code ?? "INTERNAL_ERROR", err?.message ?? `HTTP ${res.status}`, err?.details);
   }
-  return body as BankSyncResult;
+  return body as T;
+}
+
+/**
+ * One-off sync: logs in to the bank / card company on the server, imports
+ * the transactions and returns how many were added. The credentials are not
+ * stored — don't keep them in component state longer than the form submit.
+ */
+export function syncBankTransactions(
+  companyId: string,
+  credentials: Record<string, string>,
+  startDate: string,
+): Promise<BankSyncResult> {
+  return apiRequest("POST", "/api/scrape-transactions", { companyId, credentials, startDate });
+}
+
+export async function listConnections(): Promise<BankConnection[]> {
+  return (await apiRequest<{ connections: BankConnection[] }>("GET", "/api/connections")).connections;
+}
+
+/**
+ * Logs in, imports once, and — only if the login worked — saves the
+ * credentials encrypted on the server for future one-click syncs. Replaces
+ * any existing connection to the same provider.
+ */
+export function connectAccount(
+  companyId: string,
+  credentials: Record<string, string>,
+  startDate: string,
+): Promise<ConnectionSyncResult> {
+  return apiRequest("POST", "/api/connections", { companyId, credentials, startDate });
+}
+
+/** Syncs a saved connection with its stored credentials. */
+export function syncConnection(id: string): Promise<ConnectionSyncResult> {
+  return apiRequest("POST", `/api/connections/${encodeURIComponent(id)}/sync`);
+}
+
+export async function removeConnection(id: string): Promise<void> {
+  await apiRequest("DELETE", `/api/connections/${encodeURIComponent(id)}`);
 }

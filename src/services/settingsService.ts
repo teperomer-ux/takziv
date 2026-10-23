@@ -14,6 +14,8 @@ export interface AppSettings {
   partner1Income: number;
   partner2Income: number;
   theme: "light" | "dark";
+  /** Sync saved bank connections in the background when the app opens (if last sync > 24h). */
+  autoSyncOnStartup: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -22,6 +24,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   partner1Income: 0,
   partner2Income: 0,
   theme: "light",
+  autoSyncOnStartup: false,
 };
 
 export async function saveSettings(

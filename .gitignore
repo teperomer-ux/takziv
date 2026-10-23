@@ -15,3 +15,6 @@ server/build/
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Local key that encrypts saved bank credentials (never commit)
+server/.secrets/
