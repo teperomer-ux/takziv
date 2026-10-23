@@ -61,7 +61,9 @@ const ERROR_MESSAGES: Record<BankSyncErrorCode, string> = {
   BANK_ERROR: "אתר הבנק החזיר שגיאה לא צפויה. נסו שוב מאוחר יותר.",
   SAVE_FAILED: "העסקאות נמשכו אך השמירה נכשלה. אפשר לנסות שוב — עסקאות לא ישוכפלו.",
   INTERNAL_ERROR: "אירעה שגיאה בלתי צפויה. נסו שוב.",
-  NETWORK_ERROR: "לא ניתן להתחבר לשרת הסנכרון. בדקו את החיבור לאינטרנט ונסו שוב.",
+  NETWORK_ERROR: import.meta.env.DEV
+    ? "שרת הסנכרון המקומי לא פועל. הפעילו אותו עם npm run dev:server (או npm run dev:all) ונסו שוב."
+    : "לא ניתן להתחבר לשרת הסנכרון. בדקו את החיבור לאינטרנט ונסו שוב.",
 };
 
 /** YYYY-MM-DD in local time. */
