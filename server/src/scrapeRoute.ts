@@ -3,9 +3,8 @@ import { z } from "zod";
 import { CompanyTypes } from "israeli-bank-scrapers";
 import { requireGoogleUser } from "./auth.js";
 import { ApiError, sendError } from "./errors.js";
-import { missingLoginFields, runScrape } from "./scrapeRunner.js";
-import { mapScrapedTransactions } from "./transactionMapper.js";
-import { getUserMappings, saveNewTransactions } from "./transactionRepository.js";
+import { missingLoginFields } from "./scrapeRunner.js";
+import { syncProvider } from "./scraperService.js";
 
 const MAX_CONCURRENT_SCRAPES = Number(process.env.MAX_CONCURRENT_SCRAPES ?? 2);
 
@@ -52,32 +51,22 @@ scrapeRouter.post("/api/scrape-transactions", requireGoogleUser, async (req, res
     console.info(JSON.stringify({ event: "scrape", uid, companyId, outcome, ms: Date.now() - startedAt, ...extra }));
 
   try {
-    let accounts;
-    try {
-      accounts = await runScrape(companyId, credentials, start);
-    } finally {
-      credentials = undefined;
-    }
+    const request = { provider: companyId, credentials, startDate: start };
+    credentials = undefined;
+    const result = await syncProvider(uid, request);
 
-    const mappings = await getUserMappings(uid);
-    const { expenses, incomes, skippedPending, skippedCardPayments } = mapScrapedTransactions(
-      companyId,
-      accounts,
-      mappings,
-    );
-
-    let savedExpenses: number;
-    let savedIncomes: number;
-    try {
-      savedExpenses = await saveNewTransactions(uid, "transactions", expenses);
-      savedIncomes = await saveNewTransactions(uid, "incomeTransactions", incomes);
-    } catch (err) {
-      throw new ApiError("SAVE_FAILED", { internalMessage: err instanceof Error ? err.message : String(err) });
-    }
-
-    const fetched = expenses.length + incomes.length;
+    const fetched = result.expenses.length + result.incomes.length;
+    const savedExpenses = result.expensesSaved.inserted;
+    const savedIncomes = result.incomesSaved.inserted;
     const saved = savedExpenses + savedIncomes;
-    log("success", { fetched, saved, savedIncomes, skippedCardPayments });
+    const duplicateByContent = result.expensesSaved.duplicateByContent + result.incomesSaved.duplicateByContent;
+    log("success", {
+      fetched,
+      saved,
+      savedIncomes,
+      duplicateByContent,
+      skippedCardPayments: result.skippedCardPayments,
+    });
     res.json({
       success: true,
       companyId,
@@ -85,9 +74,9 @@ scrapeRouter.post("/api/scrape-transactions", requireGoogleUser, async (req, res
       savedExpenseCount: savedExpenses,
       savedIncomeCount: savedIncomes,
       duplicateCount: fetched - saved,
-      skippedPendingCount: skippedPending,
-      skippedCardPaymentCount: skippedCardPayments,
-      accounts: accounts.map((a) => ({ accountNumber: a.accountNumber, balance: a.balance ?? null })),
+      skippedPendingCount: result.skippedPending,
+      skippedCardPaymentCount: result.skippedCardPayments,
+      accounts: result.accounts,
     });
   } catch (err) {
     const apiErr = err instanceof ApiError ? err : new ApiError("INTERNAL_ERROR");

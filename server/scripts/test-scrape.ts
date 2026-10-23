@@ -14,14 +14,16 @@ import { parseArgs } from "node:util";
 import { CompanyTypes, SCRAPERS } from "israeli-bank-scrapers";
 import { adminAuth } from "../src/firebaseAdmin.js";
 import { ApiError } from "../src/errors.js";
-import { missingLoginFields, runScrape } from "../src/scrapeRunner.js";
-import { mapScrapedTransactions, type MappedTransaction, type UserMappings } from "../src/transactionMapper.js";
+import { missingLoginFields } from "../src/scrapeRunner.js";
+import { scrapeProvider } from "../src/scraperService.js";
+import type { MappedTransaction, UserMappings } from "../src/transactionMapper.js";
 import { getUserMappings, saveNewTransactions } from "../src/transactionRepository.js";
 
 const USAGE = `Usage: npm run scrape:test -- --company <id> [options]
 
   --company <id>    ${["max", "isracard", "amex", "visaCal", "hapoalim", "leumi", "discount", "mizrahi"].join(", ")}, …
   --since <date>    YYYY-MM-DD, default 30 days ago
+  --until <date>    YYYY-MM-DD, default today
   --user <who>      Firebase uid or Google e-mail; needed for --save (and to use learned categories)
   --save            write new rows to users/{uid}/transactions as drafts (default: dry run)
   --show-browser    run Chromium with a visible window
@@ -31,6 +33,7 @@ const { values: args } = parseArgs({
   options: {
     company: { type: "string" },
     since: { type: "string" },
+    until: { type: "string" },
     user: { type: "string" },
     save: { type: "boolean", default: false },
     "show-browser": { type: "boolean", default: false },
@@ -135,6 +138,8 @@ async function main() {
 
   const since = args.since ? new Date(args.since) : new Date(Date.now() - 30 * 86_400_000);
   if (Number.isNaN(since.getTime()) || since > new Date()) fail("--since must be a past YYYY-MM-DD date.");
+  const until = args.until ? new Date(args.until) : undefined;
+  if (until && (Number.isNaN(until.getTime()) || until < since)) fail("--until must be a YYYY-MM-DD date after --since.");
   const limit = Number(args.limit) || 50;
 
   // Resolve the user before asking for bank credentials, so a typo fails fast.
@@ -150,9 +155,12 @@ async function main() {
 
   console.log(`\nLaunching Chromium${args["show-browser"] ? " (visible)" : " (headless)"} and logging in…`);
   const startedAt = Date.now();
-  let accounts;
+  const mappings: UserMappings = uid ? await getUserMappings(uid) : { expense: [], income: [] };
+  let outcome;
   try {
-    accounts = await runScrape(companyId, credentials, since, { headless: !args["show-browser"] });
+    const request = { provider: companyId, credentials, startDate: since, endDate: until, headless: !args["show-browser"] };
+    credentials = undefined;
+    outcome = await scrapeProvider(request, mappings);
   } catch (err) {
     if (err instanceof ApiError) {
       // internalMessage was already redacted of credential values by the runner.
@@ -160,40 +168,35 @@ async function main() {
       fail(`Scrape failed: ${err.code} ${JSON.stringify(rest)}${internalMessage ? `\n  ${internalMessage}` : ""}`);
     }
     throw err;
-  } finally {
-    credentials = undefined;
   }
   console.log(`✔ Scraped in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
-  for (const a of accounts) {
-    console.log(`  account ${a.accountNumber}: ${a.txns.length} txns${a.balance != null ? `, balance ${a.balance}` : ""}`);
+  for (const a of outcome.accounts) {
+    console.log(`  account ${a.accountNumber}${a.balance != null ? `: balance ${a.balance}` : ""}`);
   }
 
-  const mappings: UserMappings = uid ? await getUserMappings(uid) : { expense: [], income: [] };
-  const { expenses, incomes, skippedPending, skippedCardPayments } = mapScrapedTransactions(
-    companyId,
-    accounts,
-    mappings,
-  );
-
+  const { expenses, incomes } = outcome;
   printRows("Expenses → users/{uid}/transactions", expenses, limit);
   printRows("Incomes → users/{uid}/incomeTransactions", incomes, limit);
-  console.log(`\nSkipped: ${skippedPending} pending, ${skippedCardPayments} credit-card bill payments`);
+  console.log(
+    `\nSkipped: ${outcome.skippedPending} pending, ${outcome.skippedCardPayments} credit-card bill payments, ` +
+      `${outcome.skippedOutOfRange} after --until`,
+  );
 
   if (!args.save || !uid) {
     console.log("\nDry run — nothing written. Add --user <uid|e-mail> --save to store these as drafts.\n");
     return;
   }
 
-  const savedExpenses = await saveNewTransactions(uid, "transactions", expenses);
-  const savedIncomes = await saveNewTransactions(uid, "incomeTransactions", incomes);
-  const fetched = expenses.length + incomes.length;
-  console.log(`\n✔ Saved ${savedExpenses} expenses + ${savedIncomes} incomes as drafts`);
-  console.log(`  ${fetched - savedExpenses - savedIncomes} already existed and were left untouched`);
+  const e = await saveNewTransactions(uid, "transactions", expenses);
+  const i = await saveNewTransactions(uid, "incomeTransactions", incomes);
+  console.log(`\n✔ Saved ${e.inserted} expenses + ${i.inserted} incomes as drafts`);
+  console.log(`  ${e.duplicateById + i.duplicateById} already saved by an earlier sync`);
+  console.log(`  ${e.duplicateByContent + i.duplicateByContent} already present from a file upload (same date + amount + business)`);
 
   // Prove the duplicate protection: re-writing the same rows must insert nothing.
   const again =
-    (await saveNewTransactions(uid, "transactions", expenses)) +
-    (await saveNewTransactions(uid, "incomeTransactions", incomes));
+    (await saveNewTransactions(uid, "transactions", expenses)).inserted +
+    (await saveNewTransactions(uid, "incomeTransactions", incomes)).inserted;
   if (again !== 0) fail(`Duplicate check FAILED: re-saving inserted ${again} rows`);
   console.log("✔ Duplicate check: re-saving the same rows inserted 0\n");
 }

@@ -1,6 +1,7 @@
-import { Timestamp, type DocumentReference } from "firebase-admin/firestore";
+import { Timestamp, type CollectionReference } from "firebase-admin/firestore";
 import type { UserMapping } from "../../src/utils/classifier.js";
 import { adminDb } from "./firebaseAdmin.js";
+import { findContentDuplicates, type ExistingRow } from "./dedupe.js";
 import type { MappedTransaction, UserMappings } from "./transactionMapper.js";
 
 const BATCH_LIMIT = 500;
@@ -31,28 +32,41 @@ export async function getUserMappings(userId: string): Promise<UserMappings> {
 }
 
 /**
- * Inserts rows that don't exist yet into users/{uid}/{collection}.
- * Existing docs (same deterministic id) are left untouched so a re-sync never
- * overwrites categories the user already edited. Returns the number inserted.
+ * Inserts rows that don't exist yet into users/{uid}/{collection}, skipping
+ *  - rows whose deterministic id already exists (an earlier sync), and
+ *  - rows matching an existing doc by date + amount + business name (e.g. an
+ *    earlier CSV upload, which used random ids) — see findContentDuplicates.
+ * Existing docs are never touched, so a re-sync can't overwrite categories
+ * the user already edited.
  */
 export async function saveNewTransactions(
   userId: string,
   collection: TargetCollection,
   txs: MappedTransaction[],
-): Promise<number> {
+): Promise<SaveResult> {
   const col = adminDb.collection("users").doc(userId).collection(collection);
-  let inserted = 0;
 
+  const missing: MappedTransaction[] = [];
   for (let i = 0; i < txs.length; i += BATCH_LIMIT) {
     const chunk = txs.slice(i, i + BATCH_LIMIT);
-    const refs: DocumentReference[] = chunk.map((tx) => col.doc(tx.id));
-    const existing = await adminDb.getAll(...refs);
-
-    const batch = adminDb.batch();
-    let pending = 0;
+    const snaps = await adminDb.getAll(...chunk.map((tx) => col.doc(tx.id)));
     chunk.forEach((tx, idx) => {
-      if (existing[idx].exists) return;
-      batch.create(refs[idx], {
+      if (!snaps[idx].exists) missing.push(tx);
+    });
+  }
+
+  let contentDuplicates = new Set<string>();
+  if (missing.length) {
+    const scrapedIds = new Set(txs.map((tx) => tx.id));
+    const existing = (await readRowsInRange(col, missing)).filter((row) => !scrapedIds.has(row.id));
+    contentDuplicates = findContentDuplicates(missing, existing);
+  }
+  const toInsert = missing.filter((tx) => !contentDuplicates.has(tx.id));
+
+  for (let i = 0; i < toInsert.length; i += BATCH_LIMIT) {
+    const batch = adminDb.batch();
+    for (const tx of toInsert.slice(i, i + BATCH_LIMIT)) {
+      batch.create(col.doc(tx.id), {
         // Stored as UTC midnight, matching the client's Timestamp.fromDate(new Date("YYYY-MM-DD")).
         date: Timestamp.fromDate(new Date(`${tx.date}T00:00:00Z`)),
         description: tx.description,
@@ -68,12 +82,40 @@ export async function saveNewTransactions(
         importedFrom: "bank-sync",
         importedAt: Timestamp.now(),
       });
-      pending++;
-    });
-
-    if (pending > 0) await batch.commit();
-    inserted += pending;
+    }
+    await batch.commit();
   }
 
-  return inserted;
+  return {
+    inserted: toInsert.length,
+    duplicateById: txs.length - missing.length,
+    duplicateByContent: contentDuplicates.size,
+  };
+}
+
+export interface SaveResult {
+  inserted: number;
+  /** Already saved by an earlier sync (same deterministic id). */
+  duplicateById: number;
+  /** Already present under another id, e.g. from a CSV upload. */
+  duplicateByContent: number;
+}
+
+/** Existing docs dated within the span of `txs` (dates are stored as UTC midnight). */
+async function readRowsInRange(col: CollectionReference, txs: MappedTransaction[]): Promise<ExistingRow[]> {
+  const dates = txs.map((tx) => tx.date).sort();
+  const snapshot = await col
+    .where("date", ">=", Timestamp.fromDate(new Date(`${dates[0]}T00:00:00Z`)))
+    .where("date", "<=", Timestamp.fromDate(new Date(`${dates[dates.length - 1]}T00:00:00Z`)))
+    .get();
+  return snapshot.docs.map((d) => {
+    const data = d.data();
+    return {
+      id: d.id,
+      date: (data.date as Timestamp).toDate().toISOString().slice(0, 10),
+      amount: Number(data.amount ?? 0),
+      description: String(data.description ?? ""),
+      source: typeof data.source === "string" ? data.source : undefined,
+    };
+  });
 }
