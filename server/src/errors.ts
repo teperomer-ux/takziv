@@ -23,6 +23,9 @@ export const API_ERRORS = {
   CONNECTION_NOT_FOUND: [404, "No such saved connection"],
   CONNECTION_NEEDS_ATTENTION: [409, "This connection needs new login details before it can sync again"],
   CREDENTIAL_STORE_UNAVAILABLE: [500, "The server cannot store credentials right now"],
+  AI_NOT_CONFIGURED: [503, "The AI assistant has no API key configured on the server"],
+  AI_RATE_LIMITED: [429, "Too many questions, try again in a few minutes"],
+  AI_ERROR: [502, "The AI provider returned an error"],
   INTERNAL_ERROR: [500, "Unexpected server error"],
 } as const satisfies Record<string, readonly [number, string]>;
 

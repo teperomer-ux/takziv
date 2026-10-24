@@ -6,6 +6,7 @@ import TransactionList from "./components/TransactionList";
 import IncomeList from "./components/IncomeList";
 import SettingsModal from "./components/SettingsModal";
 import BankSyncModal from "./components/BankSyncModal";
+import AIAssistantModal from "./components/AIAssistantModal";
 import Login from "./components/Login";
 import { useTransactions } from "./hooks/useTransactions";
 import { useIncomeTransactions } from "./hooks/useIncomeTransactions";
@@ -331,6 +332,9 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
 
       {/* ── Bottom Navigation ─────────────────────────────────── */}
       <BottomNav active={tab} onChange={(t) => { setTab(t); if (t !== "expenses") setFilterUncategorized(false); }} />
+
+      {/* ── AI assistant (floating button + chat) ───────────── */}
+      <AIAssistantModal />
 
       {/* ── Settings Modal ────────────────────────────────────── */}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />

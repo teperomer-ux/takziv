@@ -70,7 +70,8 @@ export class BankSyncError extends Error {
   }
 }
 
-async function apiRequest<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, payload?: unknown): Promise<T> {
+/** Authenticated call to the sync server; throws BankSyncError with the server error code. */
+export async function apiRequest<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, payload?: unknown): Promise<T> {
   const user = auth.currentUser;
   if (!user) throw new BankSyncError("UNAUTHENTICATED", "Not signed in");
   const token = await user.getIdToken();
