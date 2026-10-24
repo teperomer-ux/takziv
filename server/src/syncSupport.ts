@@ -2,19 +2,32 @@ import type { Response } from "express";
 import { ApiError, sendError, type ApiErrorCode } from "./errors.js";
 import type { SyncOutcome } from "./scraperService.js";
 
-const MAX_CONCURRENT_SCRAPES = Number(process.env.MAX_CONCURRENT_SCRAPES ?? 2);
+export const MAX_CONCURRENT_SCRAPES = Math.max(1, Number(process.env.MAX_CONCURRENT_SCRAPES ?? 2));
 
-// Per-instance guards shared by every route that logs in to a bank: one sync
-// per user (repeated parallel logins can get a bank account locked) and a
-// global cap on simultaneous Chromium instances.
-const activeUsers = new Set<string>();
+/** A saved connection is due for a scheduled sync once its last sync is this old. */
+export const SYNC_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
-/** Returns a release function, or the error code to send if the user can't sync now. */
-export function acquireSyncSlot(uid: string): (() => void) | ApiErrorCode {
-  if (activeUsers.has(uid)) return "SCRAPE_IN_PROGRESS";
-  if (activeUsers.size >= MAX_CONCURRENT_SCRAPES) return "SERVER_BUSY";
-  activeUsers.add(uid);
-  return () => activeUsers.delete(uid);
+// Per-instance cap on simultaneous Chromium instances (~300-500MB RAM each).
+// Parallel logins to the same bank account — which can get it locked — are
+// prevented across instances by the Firestore lease on the connection
+// (connectionRepository.acquireSyncLease), not here.
+let activeBrowsers = 0;
+
+/** Returns an idempotent release function, or null if this instance is at capacity. */
+export function acquireBrowserSlot(limit = MAX_CONCURRENT_SCRAPES): (() => void) | null {
+  if (activeBrowsers >= limit) return null;
+  activeBrowsers++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeBrowsers--;
+  };
+}
+
+/** True if a connection never synced, or last synced more than `staleAfterMs` ago. */
+export function isSyncDue(lastSyncAt: Date | null, now = new Date(), staleAfterMs = SYNC_STALE_AFTER_MS) {
+  return !lastSyncAt || now.getTime() - lastSyncAt.getTime() > staleAfterMs;
 }
 
 /** Bank-side failures a retry can't fix: the user has to act, and retrying risks a lockout. */

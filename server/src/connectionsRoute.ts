@@ -2,21 +2,19 @@ import { Router, type Response } from "express";
 import { z } from "zod";
 import { CompanyTypes } from "israeli-bank-scrapers";
 import { requireGoogleUser } from "./auth.js";
-import { ApiError, sendError } from "./errors.js";
+import { sendError } from "./errors.js";
 import { missingLoginFields } from "./scrapeRunner.js";
 import { syncProvider } from "./scraperService.js";
 import {
   ConnectionNotFoundError,
   assertVaultReady,
   deleteConnection,
-  getConnection,
   listConnections,
-  loadCredentials,
   saveConnection,
-  updateConnectionStatus,
   type BankConnection,
 } from "./connectionRepository.js";
-import { REQUIRES_ACTION, acquireSyncSlot, sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
+import { defaultStartDate, syncSavedConnection, withProviderSlot } from "./connectionSync.js";
+import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
 /**
  * Saved bank connections. Credentials go in once (POST /api/connections),
@@ -33,25 +31,8 @@ const createSchema = z.object({
 });
 const idSchema = z.uuid();
 
-/** Overlap re-fetched on every sync so pending rows that settled since are picked up. */
-const OVERLAP_DAYS = 7;
-const MAX_LOOKBACK_DAYS = 365;
-
 function toJson(c: BankConnection) {
   return { ...c, lastSyncAt: c.lastSyncAt?.toISOString() ?? null };
-}
-
-/** From the 1st of last month, the same default the sync form uses. */
-function defaultStartDate() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth() - 1, 1);
-}
-
-function syncStartDate(lastSyncAt: Date | null) {
-  if (!lastSyncAt) return defaultStartDate();
-  const from = new Date(lastSyncAt.getTime() - OVERLAP_DAYS * 86_400_000);
-  const floor = new Date(Date.now() - MAX_LOOKBACK_DAYS * 86_400_000);
-  return from < floor ? floor : from;
 }
 
 function parseId(id: unknown, res: Response) {
@@ -98,13 +79,12 @@ connectionsRouter.post("/api/connections", async (req, res) => {
     return sendError(res, "CREDENTIAL_STORE_UNAVAILABLE");
   }
 
-  const release = acquireSyncSlot(uid);
-  if (typeof release === "string") return sendError(res, release);
   const log = syncLogger({ uid, companyId, via: "connect" });
-
   try {
-    const result = await syncProvider(uid, { provider: companyId, credentials, startDate });
-    const connection = await saveConnection(uid, companyId, credentials, { synced: true });
+    const { result, connection } = await withProviderSlot(uid, companyId, async () => {
+      const result = await syncProvider(uid, { provider: companyId, credentials: credentials!, startDate });
+      return { result, connection: await saveConnection(uid, companyId, credentials!, { synced: true }) };
+    });
     credentials = undefined;
     const body = syncResponseBody(result);
     log("success", { saved: body.savedCount, connectionId: connection.id });
@@ -113,64 +93,23 @@ connectionsRouter.post("/api/connections", async (req, res) => {
     sendSyncError(res, err, log);
   } finally {
     credentials = undefined;
-    release();
   }
 });
 
-/** Syncs a saved connection with its stored credentials. */
+/** Syncs a saved connection with its stored credentials (see connectionSync.ts). */
 connectionsRouter.post("/api/connections/:id/sync", async (req, res) => {
   const uid: string = res.locals.uid;
   const id = parseId(req.params.id, res);
   if (!id) return;
 
-  let connection: BankConnection;
+  const log = syncLogger({ uid, connectionId: id, via: "saved" });
   try {
-    connection = await getConnection(uid, id);
+    const { connection, outcome } = await syncSavedConnection(uid, id);
+    const body = syncResponseBody(outcome);
+    log("success", { companyId: connection.companyId, saved: body.savedCount });
+    res.json({ success: true, companyId: connection.companyId, connection: toJson(connection), ...body });
   } catch (err) {
-    if (err instanceof ConnectionNotFoundError) return sendError(res, "CONNECTION_NOT_FOUND");
-    throw err;
-  }
-  // Never retry a login the bank already rejected — that's how accounts get locked.
-  if (connection.status === "needs_attention") {
-    return sendError(res, "CONNECTION_NEEDS_ATTENTION", { lastErrorCode: connection.lastErrorCode });
-  }
-
-  const release = acquireSyncSlot(uid);
-  if (typeof release === "string") return sendError(res, release);
-  const log = syncLogger({ uid, companyId: connection.companyId, connectionId: id, via: "saved" });
-
-  try {
-    let stored;
-    try {
-      stored = await loadCredentials(uid, id);
-    } catch (err) {
-      // Key missing/changed: the saved login is unusable until re-entered.
-      await updateConnectionStatus(uid, id, { status: "needs_attention", lastErrorCode: "CREDENTIALS_UNREADABLE" });
-      throw new ApiError("CONNECTION_NEEDS_ATTENTION", {
-        lastErrorCode: "CREDENTIALS_UNREADABLE",
-        internalMessage: String(err),
-      });
-    }
-
-    const result = await syncProvider(uid, {
-      provider: stored.companyId,
-      credentials: stored.credentials,
-      startDate: syncStartDate(connection.lastSyncAt),
-    });
-    await updateConnectionStatus(uid, id, { status: "active", lastErrorCode: null, synced: true });
-    const body = syncResponseBody(result);
-    log("success", { saved: body.savedCount });
-    res.json({ success: true, companyId: stored.companyId, connection: toJson(await getConnection(uid, id)), ...body });
-  } catch (err) {
-    const code = sendSyncError(res, err, log);
-    if (code !== "CONNECTION_NEEDS_ATTENTION") {
-      await updateConnectionStatus(uid, id, {
-        ...(REQUIRES_ACTION.has(code) && { status: "needs_attention" }),
-        lastErrorCode: code,
-      }).catch((e) => console.error(JSON.stringify({ event: "status_update_failed", error: String(e) })));
-    }
-  } finally {
-    release();
+    sendSyncError(res, err, log);
   }
 });
 

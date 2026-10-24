@@ -2,10 +2,13 @@
 # One-time GCP setup for encrypted bank-credential storage.
 #
 # Creates a KMS key ring + key in Tel Aviv (me-west1) and two service
-# accounts with split permissions:
-#   takziv-api   can only ENCRYPT  (saves credentials the user submits)
-#   takziv-sync  can only DECRYPT  (the scheduled job that logs in to banks)
-# so a compromise of the public API cannot read any stored password.
+# accounts:
+#   takziv-api   ENCRYPT + DECRYPT  (saves the credentials the user submits,
+#                                   and logs in with them on "sync now" /
+#                                   startup auto-sync)
+#   takziv-sync  DECRYPT only       (the scheduled job, src/syncJob.ts)
+# Nobody else gets decrypt: reading a stored password needs both the
+# Firestore record and one of these two identities.
 #
 # Safe to re-run: existing resources are left as they are.
 # Requires: gcloud, logged in as a project owner (`gcloud auth login`).
@@ -47,15 +50,20 @@ done
 gcloud projects add-iam-policy-binding "$PROJECT_ID" --member "serviceAccount:$API_SA" \
   --role roles/firebaseauth.viewer --condition None >/dev/null
 
-echo "▸ Key-level roles (encrypt vs. decrypt split)"
+echo "▸ Key-level roles (API: encrypt + decrypt; sync job: decrypt)"
+# add-iam-policy-binding is a no-op when the binding already exists.
 gcloud kms keys add-iam-policy-binding "$KEY" --keyring "$KEYRING" --location "$REGION" \
-  --member "serviceAccount:$API_SA" --role roles/cloudkms.cryptoKeyEncrypter >/dev/null
+  --member "serviceAccount:$API_SA" --role roles/cloudkms.cryptoKeyEncrypterDecrypter >/dev/null
 gcloud kms keys add-iam-policy-binding "$KEY" --keyring "$KEYRING" --location "$REGION" \
   --member "serviceAccount:$SYNC_SA" --role roles/cloudkms.cryptoKeyDecrypter >/dev/null
+# Earlier versions of this script gave the API encrypt-only; that binding is
+# now redundant. Removing it fails harmlessly when it isn't there.
+gcloud kms keys remove-iam-policy-binding "$KEY" --keyring "$KEYRING" --location "$REGION" \
+  --member "serviceAccount:$API_SA" --role roles/cloudkms.cryptoKeyEncrypter >/dev/null 2>&1 || true
 
 echo
-echo "Done. Set this on both Cloud Run services/jobs:"
+echo "Done. Set this on the API service and the sync job:"
 echo "  KMS_CREDENTIALS_KEY=projects/${PROJECT_ID}/locations/${REGION}/keyRings/${KEYRING}/cryptoKeys/${KEY}"
 echo
-echo "Check that nobody else holds decrypt on the key:"
+echo "Check that only takziv-api and takziv-sync hold decrypt on the key:"
 echo "  gcloud kms keys get-iam-policy $KEY --keyring $KEYRING --location $REGION"

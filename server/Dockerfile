@@ -1,5 +1,7 @@
 # Build from the repo root (the server reuses classifiers from src/utils):
 #   docker build -f server/Dockerfile -t takziv-server .
+# The same image runs the scheduled sync as a Cloud Run Job by overriding the
+# command: node build/server/src/syncJob.js
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app/server

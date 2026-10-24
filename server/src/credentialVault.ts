@@ -8,7 +8,7 @@ import { KeyManagementServiceClient } from "@google-cloud/kms";
  * sealed locally with AES-256-GCM under that DEK, and the DEK itself is
  * wrapped by Cloud KMS. Only the wrapped DEK is stored, so reading a record
  * requires both the Firestore document and `cloudkms.cryptoKeyVersions.useToDecrypt`
- * on the key — which only the sync job's service account holds.
+ * on the key — which only the API's and the sync job's service accounts hold.
  *
  * Both layers bind the record to `uid` + `connectionId` as additional
  * authenticated data, so a ciphertext copied onto another user's or

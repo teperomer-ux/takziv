@@ -5,7 +5,8 @@ import { requireGoogleUser } from "./auth.js";
 import { sendError } from "./errors.js";
 import { missingLoginFields } from "./scrapeRunner.js";
 import { syncProvider } from "./scraperService.js";
-import { acquireSyncSlot, sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
+import { withProviderSlot } from "./connectionSync.js";
+import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
 const bodySchema = z.object({
   companyId: z.enum(CompanyTypes),
@@ -38,20 +39,16 @@ scrapeRouter.post("/api/scrape-transactions", requireGoogleUser, async (req, res
   const start = new Date(startDate);
   if (start > new Date()) return sendError(res, "INVALID_REQUEST", { fields: ["startDate"] });
 
-  const release = acquireSyncSlot(uid);
-  if (typeof release === "string") return sendError(res, release);
   const log = syncLogger({ uid, companyId });
 
   try {
     const request = { provider: companyId, credentials, startDate: start };
     credentials = undefined;
-    const result = await syncProvider(uid, request);
+    const result = await withProviderSlot(uid, companyId, () => syncProvider(uid, request));
     const body = syncResponseBody(result);
     log("success", { saved: body.savedCount, duplicates: body.duplicateCount });
     res.json({ success: true, companyId, ...body });
   } catch (err) {
     sendSyncError(res, err, log);
-  } finally {
-    release();
   }
 });

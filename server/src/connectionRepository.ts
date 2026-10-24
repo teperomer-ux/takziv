@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { FieldValue, type Timestamp } from "firebase-admin/firestore";
+import { FieldValue, Timestamp } from "firebase-admin/firestore";
 import { SCRAPERS, type CompanyTypes } from "israeli-bank-scrapers";
 import { adminDb } from "./firebaseAdmin.js";
 import {
@@ -21,7 +21,9 @@ import { loadOrCreateLocalKey } from "./localKey.js";
  *                                               write; only the Admin SDK reaches it.
  *   users/{uid}/bankConnections/{connectionId}  non-secret status (provider,
  *                                               masked login, last sync) that the
- *                                               API returns to the owner.
+ *                                               API returns to the owner, plus
+ *                                               the sync lease (syncLockUntil,
+ *                                               syncLeaseToken).
  *
  * Credentials are wrapped with Cloud KMS when KMS_CREDENTIALS_KEY is set, and
  * otherwise with a local key file (server/.secrets/credentials.key).
@@ -112,8 +114,8 @@ export async function saveConnection(
   credentials: Record<string, string>,
   { synced }: { synced: boolean },
 ): Promise<BankConnection> {
-  const existing = await connectionsCol(uid).where("companyId", "==", companyId).limit(1).get();
-  const connectionId = existing.docs[0]?.id ?? randomUUID();
+  const existingId = await findConnectionId(uid, companyId);
+  const connectionId = existingId ?? randomUUID();
   const { source, wrapper } = getVault();
   const envelope = await encryptCredentials(wrapper, uid, connectionId, credentials);
 
@@ -132,7 +134,7 @@ export async function saveConnection(
       status: "active",
       maskedLogin: maskLogin(companyId, credentials),
       lastErrorCode: null,
-      ...(existing.empty ? { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null } : {}),
+      ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null }),
       ...(synced && { lastSyncAt: FieldValue.serverTimestamp() }),
     },
     { merge: true },
@@ -172,10 +174,62 @@ export async function deleteConnection(uid: string, connectionId: string) {
   await batch.commit();
 }
 
-/** Every connection a scheduled job should sync. */
-export async function listActiveConnections(): Promise<{ uid: string; connectionId: string }[]> {
+/** The user's saved connection to `companyId`, if any (there is at most one per provider). */
+export async function findConnectionId(uid: string, companyId: CompanyTypes): Promise<string | undefined> {
+  const existing = await connectionsCol(uid).where("companyId", "==", companyId).limit(1).get();
+  return existing.docs[0]?.id;
+}
+
+/** Every healthy connection, across all users, for the scheduled job to consider. */
+export async function listActiveConnections(): Promise<{ uid: string; connection: BankConnection }[]> {
   const snapshot = await adminDb.collectionGroup("bankConnections").where("status", "==", "active").get();
-  return snapshot.docs.map((d) => ({ uid: d.ref.parent.parent!.id, connectionId: d.id }));
+  return snapshot.docs.map((d) => ({ uid: d.ref.parent.parent!.id, connection: toConnection(d.id, d.data()) }));
+}
+
+/**
+ * How long a sync may hold a connection. Longer than the 120s scrape timeout
+ * plus the Firestore writes, so a live sync never loses its lease; short
+ * enough that a crashed instance only blocks the connection briefly.
+ */
+export const SYNC_LEASE_TTL_MS = 3 * 60 * 1000;
+
+export type SyncLease =
+  | { acquired: true; token: string; connection: BankConnection }
+  | { acquired: false };
+
+/**
+ * Takes the connection's sync lease in a transaction, so at most one sync —
+ * on any instance, from the API or the scheduled job — logs in to that bank
+ * account at a time. Throws ConnectionNotFoundError if the doc is missing.
+ */
+export async function acquireSyncLease(uid: string, connectionId: string): Promise<SyncLease> {
+  const ref = connectionsCol(uid).doc(connectionId);
+  return adminDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new ConnectionNotFoundError();
+    const lockedUntil = (snap.get("syncLockUntil") as Timestamp | null | undefined)?.toMillis() ?? 0;
+    if (lockedUntil > Date.now()) return { acquired: false } as const;
+
+    const token = randomUUID();
+    tx.update(ref, {
+      syncLockUntil: Timestamp.fromMillis(Date.now() + SYNC_LEASE_TTL_MS),
+      syncLeaseToken: token,
+    });
+    return { acquired: true, token, connection: toConnection(snap.id, snap.data()!) } as const;
+  });
+}
+
+/**
+ * Releases the lease if it's still ours. A sync that overran its TTL may have
+ * been superseded by another; that newer lease must be left alone.
+ */
+export async function releaseSyncLease(uid: string, connectionId: string, token: string) {
+  const ref = connectionsCol(uid).doc(connectionId);
+  await adminDb.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists || snap.get("syncLeaseToken") !== token) return;
+    tx.update(ref, { syncLockUntil: null, syncLeaseToken: null });
+  });
 }
 
 async function getOwnedSecret(uid: string, connectionId: string): Promise<SecretDoc> {
