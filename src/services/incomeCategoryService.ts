@@ -11,6 +11,7 @@ import {
 } from "firebase/firestore";
 import { db, getUid, getUidOrNull } from "../lib/firebase";
 import { INCOME_CATEGORIES } from "../constants/incomeCategories";
+import { INCOME_EXCLUDE_FIELD, INTERNAL_TRANSFERS, readExcludeFlag } from "../utils/internalTransfers";
 
 const COLLECTION = "incomeCategories";
 const NOOP = () => {};
@@ -36,22 +37,31 @@ export async function getIncomeCategories(): Promise<Record<string, string[]>> {
 }
 
 export function onIncomeCategoriesSnapshot(
-  callback: (cats: Record<string, string[]>) => void,
+  callback: (cats: Record<string, string[]>, excluded: string[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  if (!getUidOrNull()) { callback({}); return NOOP; }
+  if (!getUidOrNull()) { callback({}, []); return NOOP; }
   return onSnapshot(
     userCol(),
     (snapshot) => {
       const result: Record<string, string[]> = {};
+      const excluded: string[] = [];
       for (const d of snapshot.docs) {
         const data = d.data();
         result[d.id] = Array.isArray(data.subCategories) ? data.subCategories : [];
+        if (readExcludeFlag(d.id, data[INCOME_EXCLUDE_FIELD])) excluded.push(d.id);
       }
-      callback(result);
+      callback(result, excluded);
     },
     onError
   );
+}
+
+/** Mark an income category as left out of (or counted in) the income totals. */
+export async function setIncomeCategoryExcluded(name: string, excluded: boolean): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  await updateDoc(userDoc(trimmed), { [INCOME_EXCLUDE_FIELD]: excluded });
 }
 
 export async function addIncomeCategory(name: string): Promise<void> {
@@ -100,6 +110,7 @@ export async function seedIncomeCategories(): Promise<void> {
         setDoc(userDoc(name), {
           name,
           subCategories: subs,
+          ...(name === INTERNAL_TRANSFERS && { [INCOME_EXCLUDE_FIELD]: true }),
         })
       );
     }

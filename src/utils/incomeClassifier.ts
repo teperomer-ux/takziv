@@ -4,6 +4,7 @@
  */
 
 import { findLearnedRule } from "./descriptionKey.js";
+import { INTERNAL_TRANSFERS } from "./internalTransfers.js";
 
 export type MatchSource = "learned" | "system";
 
@@ -26,6 +27,18 @@ interface Rule {
 }
 
 const RULES: Rule[] = [
+  // ─── העברות פנימיות — not income; checked first so the generic
+  // "העברה" rule below never claims them ───────────────────────
+  { keyword: "העברה בין חשבונות", category: INTERNAL_TRANSFERS, subCategory: "העברה בין חשבונות" },
+  { keyword: "העברה עצמית", category: INTERNAL_TRANSFERS, subCategory: "העברה עצמית" },
+  { keyword: "מכירת ני", category: INTERNAL_TRANSFERS, subCategory: "מימוש נייר ערך / השקעה" },
+  { keyword: "מכירת נ\"ע", category: INTERNAL_TRANSFERS, subCategory: "מימוש נייר ערך / השקעה" },
+  { keyword: "פדיון פיקדון", category: INTERNAL_TRANSFERS, subCategory: "פדיון פיקדון" },
+  { keyword: "פדיון פקדון", category: INTERNAL_TRANSFERS, subCategory: "פדיון פיקדון" },
+  { keyword: "פירעון פיקדון", category: INTERNAL_TRANSFERS, subCategory: "פדיון פיקדון" },
+  { keyword: "פירעון פקדון", category: INTERNAL_TRANSFERS, subCategory: "פדיון פיקדון" },
+  { keyword: "הלוואה", category: INTERNAL_TRANSFERS, subCategory: "הלוואה שהתקבלה" },
+
   // ─── משכורת ────────────────────────────────────────────────
   { keyword: "משכורת", category: "משכורת", subCategory: "משכורת נטו" },
   { keyword: "שכר", category: "משכורת", subCategory: "משכורת נטו" },
@@ -34,8 +47,10 @@ const RULES: Rule[] = [
   { keyword: "הבראה", category: "משכורת", subCategory: "דמי הבראה" },
 
   // ─── העברות / פרילנס ───────────────────────────────────────
-  { keyword: "העברה", category: "העברות מלקוחות", subCategory: "העברה בנקאית" },
   { keyword: "פרילנס", category: "העברות מלקוחות", subCategory: "פרילנס" },
+  // A bare transfer could be anything (a client, family, a friend), so it
+  // isn't assumed to be work income.
+  { keyword: "העברה", category: "שונות", subCategory: "העברה בנקאית" },
 
   // ─── החזרים ────────────────────────────────────────────────
   { keyword: "החזר מס", category: "החזרים", subCategory: "החזר מס" },

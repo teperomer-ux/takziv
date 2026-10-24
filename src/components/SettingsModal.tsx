@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
-import { X, Grid3X3, Database, Palette, Wallet, Trash2, Pencil, Plus, ChevronDown, ChevronLeft } from "lucide-react";
+import { X, Grid3X3, Database, Palette, Wallet, Trash2, Pencil, Plus, ChevronDown, ChevronLeft, Wand2 } from "lucide-react";
 import { useSettings } from "../hooks/useSettings";
 import { useCategories } from "../hooks/useCategories";
 import { clearAllMappings } from "../services/mappingService";
+import { reapplyRulesToHistory, type ReclassifyResult } from "../services/reclassifyService";
 import { auth } from "../lib/firebase";
 import {
   getFinancialProfile,
@@ -103,6 +104,8 @@ function CategoriesTab() {
     deleteCategory,
     removeSubCategory,
     renameCategory,
+    excludedCategories,
+    setCategoryExcluded,
   } = useCategories();
 
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -284,6 +287,16 @@ function CategoriesTab() {
               {/* Sub-categories */}
               {isExpanded && (
                 <div className="border-t border-slate-50 bg-slate-50/50 px-3 py-2 space-y-1">
+                  {/* Internal transfers (buying securities, deposits) are not spending */}
+                  <label className="flex items-center gap-2 py-1 text-xs text-slate-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={excludedCategories.has(cat)}
+                      onChange={(e) => setCategoryExcluded(cat, e.target.checked)}
+                      className="h-3.5 w-3.5 rounded border-slate-300 accent-primary"
+                    />
+                    לא לספור בסך ההוצאות (העברה פנימית)
+                  </label>
                   {subs.length === 0 && (
                     <p className="text-xs text-slate-400 py-1">אין תת סעיפים</p>
                   )}
@@ -349,6 +362,9 @@ function CategoriesTab() {
 // ─── Data Management Tab ───────────────────────────────────────────────────
 
 function DataTab() {
+  const [reclassifying, setReclassifying] = useState(false);
+  const [reclassified, setReclassified] = useState<ReclassifyResult | null>(null);
+  const [reclassifyFailed, setReclassifyFailed] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [cleared, setCleared] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -369,8 +385,54 @@ function DataTab() {
     }
   }
 
+  async function handleReclassify() {
+    const uid = auth.currentUser?.uid;
+    if (!uid) return;
+    setReclassifying(true);
+    setReclassified(null);
+    setReclassifyFailed(false);
+    try {
+      setReclassified(await reapplyRulesToHistory(uid));
+    } catch (err) {
+      console.error("[Settings] reclassify failed:", err);
+      setReclassifyFailed(true);
+    } finally {
+      setReclassifying(false);
+    }
+  }
+
   return (
     <div className="space-y-5">
+      <div>
+        <h3 className="text-sm font-semibold text-slate-700 mb-1">
+          סיווג תנועות עבר
+        </h3>
+        <p className="text-xs text-slate-500 mb-3">
+          מחיל את הכללים הנוכחיים על כל התנועות שכבר יובאו: משלים סעיף לתנועות
+          ללא סיווג, ומעביר העברות בין חשבונות, מכירת ני״ע ופדיון פיקדון לסעיף
+          "העברות פנימיות" כדי שלא ייספרו כהכנסה או כהוצאה. תנועות שסיווגת
+          בעצמך לא ישתנו.
+        </p>
+        <button
+          onClick={handleReclassify}
+          disabled={reclassifying}
+          className="flex items-center gap-1.5 rounded-lg border border-primary/30 text-primary px-4 py-2 text-sm font-medium hover:bg-primary/5 transition-colors disabled:opacity-50"
+        >
+          <Wand2 className="h-4 w-4" />
+          {reclassifying ? "מסווג..." : "החל כללים חדשים על תנועות עבר"}
+        </button>
+        {reclassified && (
+          <p className="text-xs text-emerald-600 font-medium mt-2">
+            {reclassified.expenses + reclassified.incomes === 0
+              ? "לא נמצאו תנועות לעדכון."
+              : `עודכנו ${reclassified.incomes} הכנסות ו-${reclassified.expenses} הוצאות.`}
+          </p>
+        )}
+        {reclassifyFailed && (
+          <p className="text-xs text-red-600 font-medium mt-2">הסיווג נכשל. נסו שוב.</p>
+        )}
+      </div>
+
       <div>
         <h3 className="text-sm font-semibold text-slate-700 mb-1">
           מיפויים נלמדים

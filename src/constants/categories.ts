@@ -1,3 +1,5 @@
+import { INTERNAL_TRANSFERS, EXPENSE_TRANSFER_SUBCATEGORIES } from "../utils/internalTransfers";
+
 /**
  * Full category → sub-category mapping.
  * Based on the user's Excel budget structure.
@@ -98,6 +100,8 @@ export const CATEGORIES: Record<string, string[]> = {
     "הוצאות חד פעמיות",
     "כלבו / סין",
   ],
+  // Not spending — flagged excludeFromExpenseTotals when seeded.
+  [INTERNAL_TRANSFERS]: EXPENSE_TRANSFER_SUBCATEGORIES,
   "זיכויים/החזרים": [
     "החזר כספי",
     "זיכוי עסקה",

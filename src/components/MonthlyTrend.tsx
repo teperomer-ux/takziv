@@ -10,6 +10,7 @@ import {
   Tooltip,
 } from "recharts";
 import type { Transaction } from "../types";
+import { isExcludedFromTotals } from "../utils/internalTransfers";
 
 const SHORT_MONTHS = [
   "ינו", "פבר", "מרץ", "אפר", "מאי", "יונ",
@@ -20,9 +21,11 @@ interface Props {
   allTransactions: Transaction[];
   year: number;
   month: number;
+  /** Categories left out of the expense totals (internal transfers). */
+  excludedCategories: ReadonlySet<string>;
 }
 
-export default function MonthlyTrend({ allTransactions, year, month }: Props) {
+export default function MonthlyTrend({ allTransactions, year, month, excludedCategories }: Props) {
   const data = useMemo(() => {
     const points: { key: string; label: string; total: number; isCurrent: boolean }[] = [];
 
@@ -34,6 +37,7 @@ export default function MonthlyTrend({ allTransactions, year, month }: Props) {
       let total = 0;
       for (const tx of allTransactions) {
         if (tx.category === "מקורות הכנסה") continue;
+        if (isExcludedFromTotals(tx.category, excludedCategories)) continue;
         if (tx.billingYear === y && tx.billingMonth === m) total += tx.amount;
       }
       points.push({
@@ -44,7 +48,7 @@ export default function MonthlyTrend({ allTransactions, year, month }: Props) {
       });
     }
     return points;
-  }, [allTransactions, year, month]);
+  }, [allTransactions, year, month, excludedCategories]);
 
   const avg = useMemo(() => {
     const withData = data.filter((d) => d.total > 0);

@@ -18,6 +18,9 @@ import CategoryBreakdown from "./CategoryBreakdown";
 import SmartSaverOnboarding from "./SmartSaverOnboarding";
 import SavingsInsightsList from "./SavingsInsightsList";
 import BankSyncModal from "./BankSyncModal";
+import { useCategories } from "../hooks/useCategories";
+import { useIncomeCategories } from "../hooks/useIncomeCategories";
+import { isExcludedFromTotals, splitTotals } from "../utils/internalTransfers";
 
 interface Props {
   transactions: Transaction[];
@@ -64,8 +67,13 @@ interface BudgetAggregation {
  *
  * Income rows and blank-category rows are excluded — income is its own card,
  * and uncategorised rows are surfaced separately so the user can sort them.
+ * Rows in a category flagged excludeFromExpenseTotals (internal transfers:
+ * buying securities, deposits) are money the user still owns, not spending.
  */
-function aggregateBudgetSpending(transactions: Transaction[]): BudgetAggregation {
+function aggregateBudgetSpending(
+  transactions: Transaction[],
+  excludedCategories: ReadonlySet<string>,
+): BudgetAggregation {
   const spending = new Map<string, number>();
   let totalSpent = 0;
   let uncategorizedCount = 0;
@@ -86,6 +94,7 @@ function aggregateBudgetSpending(transactions: Transaction[]): BudgetAggregation
       uncategorizedCount++;
       continue;
     }
+    if (isExcludedFromTotals(tx.category, excludedCategories)) continue;
 
     spending.set(tx.category, (spending.get(tx.category) ?? 0) + tx.amount);
     totalSpent += tx.amount;
@@ -95,11 +104,12 @@ function aggregateBudgetSpending(transactions: Transaction[]): BudgetAggregation
 }
 
 /** Compute per-category monthly averages from all historical transactions. */
-function computeAverages(allTxs: Transaction[]): Map<string, number> {
+function computeAverages(allTxs: Transaction[], excludedCategories: ReadonlySet<string>): Map<string, number> {
   const catMonths = new Map<string, Map<string, number>>();
 
   for (const tx of allTxs) {
     if (tx.category === INCOME_CATEGORY || !tx.category) continue;
+    if (isExcludedFromTotals(tx.category, excludedCategories)) continue;
     // Mirror the budget aggregator's safety net: bank-side CC bill rows are
     // the lump-sum statement payment, not real category spending. Including
     // them here would inflate the historical average for whichever category
@@ -125,6 +135,8 @@ function computeAverages(allTxs: Transaction[]): Map<string, number> {
 }
 
 export default function Dashboard({ transactions, year, month, onShowUncategorized }: Props) {
+  const { excludedCategories: excludedExpenseCategories } = useCategories();
+  const { excludedCategories: excludedIncomeCategories } = useIncomeCategories();
   const [allTxs, setAllTxs] = useState<Transaction[]>([]);
   const [loadingAvg, setLoadingAvg] = useState(true);
   const [additionalExpenses, setAdditionalExpenses] = useState<AdditionalExpense[]>([]);
@@ -194,13 +206,17 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
     [additionalExpenses, year, month],
   );
 
-  // Dynamic total income from uploaded income transactions
-  const totalIncome = useMemo(
-    () => incomeTransactions.reduce((sum, tx) => sum + tx.amount, 0),
-    [incomeTransactions],
+  // Operating income only — internal transfers (between own accounts,
+  // selling securities, …) are reported beside it, not added to it.
+  const income = useMemo(
+    () => splitTotals(incomeTransactions, excludedIncomeCategories),
+    [incomeTransactions, excludedIncomeCategories],
   );
 
-  const averages = useMemo(() => computeAverages(allTxs), [allTxs]);
+  const averages = useMemo(
+    () => computeAverages(allTxs, excludedExpenseCategories),
+    [allTxs, excludedExpenseCategories],
+  );
 
   const { charges: recurringCharges, alerts: recurringAlerts } = useMemo(
     () => calculateRecurringAndAlerts(allTxs, year, month),
@@ -212,8 +228,8 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   // bank row that represents the lump-sum CC bill payment (those would
   // double-count the individual card purchases already in `transactions`).
   const { spending, totalSpent: txTotal, uncategorizedCount } = useMemo(
-    () => aggregateBudgetSpending(transactions),
-    [transactions],
+    () => aggregateBudgetSpending(transactions, excludedExpenseCategories),
+    [transactions, excludedExpenseCategories],
   );
   // Manually-added (one-off / recurring) expenses are kept in their own
   // collection and added on top of the transaction-driven total.
@@ -268,7 +284,12 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           {/* Chart content */}
           <div className="p-4">
             {activeChart === "months" ? (
-              <MonthlyTrend allTransactions={allTxs} year={year} month={month} />
+              <MonthlyTrend
+                allTransactions={allTxs}
+                year={year}
+                month={month}
+                excludedCategories={excludedExpenseCategories}
+              />
             ) : (
               <CategoryBreakdown spending={spending} totalSpent={totalSpent} />
             )}
@@ -279,7 +300,8 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
       {/* ── Bottom Line (Hero) ──────────────────────────────────── */}
       {!loadingAvg && (
         <BottomLine
-          totalIncome={totalIncome}
+          totalIncome={income.counted}
+          internalTransfersIn={income.excluded}
           totalSpent={totalSpent}
           year={year}
           month={month}

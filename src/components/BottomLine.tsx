@@ -1,5 +1,8 @@
 interface Props {
+  /** Operating income — internal transfers already left out. */
   totalIncome: number;
+  /** Incoming internal transfers this month; shown for context, never added to income. */
+  internalTransfersIn?: number;
   totalSpent: number;
   year: number;
   month: number;
@@ -7,6 +10,7 @@ interface Props {
 
 export default function BottomLine({
   totalIncome,
+  internalTransfersIn = 0,
   totalSpent,
   year,
   month,
@@ -66,7 +70,12 @@ export default function BottomLine({
         {/* ── Income display ─────────────────────────────────── */}
         <div className="flex items-center justify-between mb-4">
           <span className="text-xs text-white/70">
-            הכנסה כוללת: {income.toLocaleString("he-IL")} ₪
+            הכנסה שוטפת: {income.toLocaleString("he-IL")} ₪
+            {internalTransfersIn > 0 && (
+              <span className="text-white/50">
+                {" "}· העברות פנימיות: {internalTransfersIn.toLocaleString("he-IL")} ₪ (לא נספרו)
+              </span>
+            )}
           </span>
         </div>
 

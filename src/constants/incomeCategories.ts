@@ -1,3 +1,5 @@
+import { INTERNAL_TRANSFERS, INCOME_TRANSFER_SUBCATEGORIES } from "../utils/internalTransfers";
+
 /**
  * Default income categories (סעיפי הכנסה).
  * Separate from expense categories to avoid conflicts.
@@ -36,4 +38,6 @@ export const INCOME_CATEGORIES: Record<string, string[]> = {
     "העברה בנקאית",
     "הכנסה אחרת",
   ],
+  // Not income — flagged excludeFromIncomeTotals when seeded.
+  [INTERNAL_TRANSFERS]: INCOME_TRANSFER_SUBCATEGORIES,
 };

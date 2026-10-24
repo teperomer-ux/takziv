@@ -7,6 +7,7 @@
  */
 
 import { findLearnedRule } from "./descriptionKey.js";
+import { INTERNAL_TRANSFERS } from "./internalTransfers.js";
 
 export type MatchSource = "learned" | "system";
 
@@ -33,6 +34,15 @@ export interface UserMapping {
  * All matching is case-insensitive and works for both Hebrew and English.
  */
 const RULES: Rule[] = [
+  // ─── העברות פנימיות — money moved to the user's own accounts or
+  // assets, not spending ─────────────────────────────────────
+  { keyword: "העברה בין חשבונות", category: INTERNAL_TRANSFERS, subCategory: "העברה בין חשבונות" },
+  { keyword: "העברה עצמית", category: INTERNAL_TRANSFERS, subCategory: "העברה עצמית" },
+  { keyword: "קניית ני", category: INTERNAL_TRANSFERS, subCategory: "קניית נייר ערך / השקעה" },
+  { keyword: "קנית ני", category: INTERNAL_TRANSFERS, subCategory: "קניית נייר ערך / השקעה" },
+  { keyword: "קניית נ\"ע", category: INTERNAL_TRANSFERS, subCategory: "קניית נייר ערך / השקעה" },
+  { keyword: "הפקדה לפיקדון", category: INTERNAL_TRANSFERS, subCategory: "הפקדה לפיקדון" },
+  { keyword: "הפקדה לפקדון", category: INTERNAL_TRANSFERS, subCategory: "הפקדה לפיקדון" },
   // ─── פנאי ובידור ──────────────────────────────────────────
   { keyword: "WOLT", category: "פנאי ובידור", subCategory: "WOLT" },
   { keyword: "וולט", category: "פנאי ובידור", subCategory: "WOLT" },

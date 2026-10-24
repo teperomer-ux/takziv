@@ -5,6 +5,7 @@ import { useIncomeCategories } from "../hooks/useIncomeCategories";
 import { useCategories } from "../hooks/useCategories";
 import BankSyncModal from "./BankSyncModal";
 import ConfirmDialog from "./ConfirmDialog";
+import { isExcludedFromTotals, splitTotals } from "../utils/internalTransfers";
 
 const MONTH_NAMES = [
   "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
@@ -48,7 +49,9 @@ export default function IncomeList({
   onBankDelete,
   onBankUpdate,
 }: Props) {
-  const { categories, categoryNames, addCategory, addSubCategory } = useIncomeCategories();
+  const { categories, categoryNames, addCategory, addSubCategory, excludedCategories } = useIncomeCategories();
+  // Operating income vs. internal transfers, which the totals leave out.
+  const incomeSplit = splitTotals(transactions, excludedCategories);
 
   const [addingCatFor, setAddingCatFor] = useState<string | null>(null);
   const [addingSubFor, setAddingSubFor] = useState<string | null>(null);
@@ -198,12 +201,43 @@ export default function IncomeList({
         </div>
       )}
 
+      {/* Summary: what counts as income, and what was only moved between own accounts */}
+      {transactions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/40 px-4 py-3 mb-4 text-sm">
+          <span className="font-semibold text-emerald-800 dark:text-emerald-300">
+            הכנסה שוטפת: <span className="tabular-nums">{incomeSplit.counted.toLocaleString("he-IL")} ₪</span>
+          </span>
+          {incomeSplit.excluded > 0 && (
+            <>
+              <span aria-hidden="true" className="text-emerald-300 dark:text-emerald-700">·</span>
+              <span className="text-slate-500 dark:text-slate-400">
+                העברות פנימיות: <span className="tabular-nums">{incomeSplit.excluded.toLocaleString("he-IL")} ₪</span>
+              </span>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="space-y-3">
-        {transactions.map((tx) => (
+        {transactions.map((tx) => {
+          const excluded = isExcludedFromTotals(tx.category, excludedCategories);
+          return (
           <div
             key={tx.id}
-            className="rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-sm border border-slate-200/60 dark:border-slate-700/60"
+            className={`rounded-2xl p-4 shadow-sm border ${
+              excluded
+                ? "bg-slate-50 dark:bg-slate-900/50 border-dashed border-slate-300 dark:border-slate-700"
+                : "bg-white dark:bg-slate-900 border-slate-200/60 dark:border-slate-700/60"
+            }`}
           >
+            {excluded && (
+              <div className="flex justify-end mb-2">
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                לא נספר בהכנסות
+              </span>
+              </div>
+            )}
+
             {/* Row 1: date, description, amount */}
             <div className="flex items-center justify-between gap-2 mb-3">
               <div className="flex items-center gap-3 min-w-0">
@@ -223,7 +257,7 @@ export default function IncomeList({
                 />
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <span className="font-bold text-sm text-emerald-600 whitespace-nowrap">
+                <span className={`font-bold text-sm whitespace-nowrap ${excluded ? "text-slate-400" : "text-emerald-600"}`}>
                   +{tx.amount.toLocaleString("he-IL")} ₪
                 </span>
                 <button
@@ -344,7 +378,8 @@ export default function IncomeList({
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* ── Bank-side expenses (עו״ש debits that aren't CC bill payments) ── */}
@@ -384,12 +419,12 @@ function BankExpensesSection({
   onUpdate,
 }: BankExpensesSectionProps) {
   // Bank debits are expenses, so they use the expense categories, not the income ones.
-  const { categories, categoryNames } = useCategories();
+  const { categories, categoryNames, excludedCategories } = useCategories();
   const expenseCategoryNames = categoryNames.filter((c) => c !== "מקורות הכנסה");
   const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
   const cancelDelete = useCallback(() => setPendingDelete(null), []);
   const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
-  const total = sorted.reduce((s, tx) => s + tx.amount, 0);
+  const totals = splitTotals(sorted, excludedCategories);
 
   function confirmDelete() {
     if (pendingDelete) onDelete(pendingDelete.id);
@@ -412,15 +447,26 @@ function BankExpensesSection({
           הוצאות מהבנק — {monthLabel} ({sorted.length})
         </h3>
         <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 tabular-nums" dir="ltr">
-          {total.toLocaleString("he-IL")} ₪
+          {totals.counted.toLocaleString("he-IL")} ₪
         </span>
       </div>
+      {totals.excluded > 0 && (
+        <p className="text-[11px] text-slate-500 dark:text-slate-400 -mt-2 mb-3 px-1">
+          לא כולל העברות פנימיות: <span className="tabular-nums">{totals.excluded.toLocaleString("he-IL")} ₪</span>
+        </p>
+      )}
 
       <div className="space-y-3">
-        {sorted.map((tx) => (
+        {sorted.map((tx) => {
+          const excluded = isExcludedFromTotals(tx.category, excludedCategories);
+          return (
           <div
             key={tx.id}
-            className="rounded-2xl bg-white dark:bg-slate-900 p-4 shadow-sm border border-rose-200/60 dark:border-rose-900/40"
+            className={`rounded-2xl p-4 shadow-sm border ${
+              excluded
+                ? "bg-slate-50 dark:bg-slate-900/50 border-dashed border-slate-300 dark:border-slate-700"
+                : "bg-white dark:bg-slate-900 border-rose-200/60 dark:border-rose-900/40"
+            }`}
           >
             <div className="flex items-baseline gap-2 mb-2 select-text">
               <span
@@ -432,6 +478,11 @@ function BankExpensesSection({
               <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
                 בנק
               </span>
+              {excluded && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                לא נספר בהוצאות
+              </span>
+              )}
               <span className="flex-1 min-w-0 text-sm font-medium text-slate-800 dark:text-slate-200 break-words leading-snug">
                 {tx.description || "—"}
               </span>
@@ -439,7 +490,7 @@ function BankExpensesSection({
 
             <div className="flex items-center justify-end gap-2 mb-3">
               <div className="flex items-center gap-2 shrink-0">
-                <span className="font-bold text-sm text-rose-600 tabular-nums" dir="ltr">
+                <span className={`font-bold text-sm tabular-nums ${excluded ? "text-slate-400" : "text-rose-600"}`} dir="ltr">
                   −{tx.amount.toLocaleString("he-IL")} ₪
                 </span>
                 <button
@@ -490,7 +541,8 @@ function BankExpensesSection({
               </select>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

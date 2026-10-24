@@ -6,8 +6,12 @@ import {
   deleteIncomeCategory as deleteCategoryFromDb,
   removeIncomeSubCategory as removeSubCategoryFromDb,
   seedIncomeCategories,
+  setIncomeCategoryExcluded,
 } from "../services/incomeCategoryService";
 import { INCOME_CATEGORIES } from "../constants/incomeCategories";
+import { INTERNAL_TRANSFERS, withDefaultExclusion } from "../utils/internalTransfers";
+
+const DEFAULT_EXCLUDED: ReadonlySet<string> = new Set([INTERNAL_TRANSFERS]);
 
 interface IncomeCategoriesContextValue {
   categories: Record<string, string[]>;
@@ -17,6 +21,9 @@ interface IncomeCategoriesContextValue {
   addSubCategory: (category: string, subCategory: string) => Promise<void>;
   deleteCategory: (name: string) => Promise<void>;
   removeSubCategory: (category: string, subCategory: string) => Promise<void>;
+  /** Categories left out of the monthly totals (e.g. internal transfers). */
+  excludedCategories: ReadonlySet<string>;
+  setCategoryExcluded: (name: string, excluded: boolean) => Promise<void>;
 }
 
 export const IncomeCategoriesContext = createContext<IncomeCategoriesContextValue>({
@@ -27,11 +34,14 @@ export const IncomeCategoriesContext = createContext<IncomeCategoriesContextValu
   addSubCategory: async () => {},
   deleteCategory: async () => {},
   removeSubCategory: async () => {},
+  excludedCategories: DEFAULT_EXCLUDED,
+  setCategoryExcluded: async () => {},
 });
 
 export function useIncomeCategoriesProvider(): IncomeCategoriesContextValue {
   const [categories, setCategories] = useState<Record<string, string[]>>(INCOME_CATEGORIES);
   const [loading, setLoading] = useState(true);
+  const [excludedCategories, setExcludedCategories] = useState<ReadonlySet<string>>(DEFAULT_EXCLUDED);
 
   useEffect(() => {
     seedIncomeCategories().catch((err) =>
@@ -39,7 +49,8 @@ export function useIncomeCategoriesProvider(): IncomeCategoriesContextValue {
     );
 
     const unsub = onIncomeCategoriesSnapshot(
-      (cats) => {
+      (cats, excluded) => {
+        setExcludedCategories(withDefaultExclusion(cats, excluded));
         setCategories((prev) => ({ ...prev, ...cats }));
         setLoading(false);
       },
@@ -92,6 +103,16 @@ export function useIncomeCategoriesProvider(): IncomeCategoriesContextValue {
     await removeSubCategoryFromDb(catTrimmed, subTrimmed);
   }, []);
 
+  const setCategoryExcluded = useCallback(async (name: string, excluded: boolean) => {
+    setExcludedCategories((prev) => {
+      const next = new Set(prev);
+      if (excluded) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+    await setIncomeCategoryExcluded(name, excluded);
+  }, []);
+
   const categoryNames = Object.keys(categories).sort((a, b) =>
     a.localeCompare(b, "he")
   );
@@ -104,6 +125,8 @@ export function useIncomeCategoriesProvider(): IncomeCategoriesContextValue {
     addSubCategory,
     deleteCategory: deleteCat,
     removeSubCategory: removeSubCat,
+    excludedCategories,
+    setCategoryExcluded,
   };
 }
 

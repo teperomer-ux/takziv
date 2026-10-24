@@ -11,6 +11,7 @@ import {
 } from "firebase/firestore";
 import { db, getUid, getUidOrNull } from "../lib/firebase";
 import { CATEGORIES } from "../constants/categories";
+import { EXPENSE_EXCLUDE_FIELD, INTERNAL_TRANSFERS, readExcludeFlag } from "../utils/internalTransfers";
 
 const COLLECTION = "categories";
 const NOOP = () => {};
@@ -44,22 +45,31 @@ export async function getCategories(): Promise<Record<string, string[]>> {
  * Returns an unsubscribe function.
  */
 export function onCategoriesSnapshot(
-  callback: (cats: Record<string, string[]>) => void,
+  callback: (cats: Record<string, string[]>, excluded: string[]) => void,
   onError?: (err: Error) => void
 ): () => void {
-  if (!getUidOrNull()) { callback({}); return NOOP; }
+  if (!getUidOrNull()) { callback({}, []); return NOOP; }
   return onSnapshot(
     userCol(),
     (snapshot) => {
       const result: Record<string, string[]> = {};
+      const excluded: string[] = [];
       for (const d of snapshot.docs) {
         const data = d.data();
         result[d.id] = Array.isArray(data.subCategories) ? data.subCategories : [];
+        if (readExcludeFlag(d.id, data[EXPENSE_EXCLUDE_FIELD])) excluded.push(d.id);
       }
-      callback(result);
+      callback(result, excluded);
     },
     onError
   );
+}
+
+/** Mark a category as left out of (or counted in) the expense totals. */
+export async function setCategoryExcluded(name: string, excluded: boolean): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  await updateDoc(userDoc(trimmed), { [EXPENSE_EXCLUDE_FIELD]: excluded });
 }
 
 /**
@@ -116,7 +126,8 @@ export async function removeSubCategory(
 export async function renameCategory(
   oldName: string,
   newName: string,
-  subCategories: string[]
+  subCategories: string[],
+  excluded = false
 ): Promise<void> {
   const oldTrimmed = oldName.trim();
   const newTrimmed = newName.trim();
@@ -124,6 +135,7 @@ export async function renameCategory(
   await setDoc(userDoc(newTrimmed), {
     name: newTrimmed,
     subCategories,
+    [EXPENSE_EXCLUDE_FIELD]: excluded,
   });
   await deleteDoc(userDoc(oldTrimmed));
 }
@@ -144,6 +156,7 @@ export async function seedCategories(): Promise<void> {
         setDoc(userDoc(name), {
           name,
           subCategories: subs,
+          ...(name === INTERNAL_TRANSFERS && { [EXPENSE_EXCLUDE_FIELD]: true }),
         })
       );
     }
