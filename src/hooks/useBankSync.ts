@@ -3,13 +3,15 @@ import {
   BankSyncError,
   connectAccount,
   listConnections,
+  needsBackfill,
   removeConnection,
   syncConnection,
+  updateConnectionStartDate,
   type BankConnection,
   type ConnectionSyncResult,
 } from "../services/bankSyncService";
 import type { AppSettings } from "../services/settingsService";
-import { ERROR_MESSAGES, attentionReason } from "../constants/bankSyncMessages";
+import { ERROR_MESSAGES, attentionReason, syncErrorMessage } from "../constants/bankSyncMessages";
 import { institutionLabel } from "../constants/institutions";
 
 const AUTO_SYNC_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -32,6 +34,10 @@ interface BankSyncContextValue {
   syncNow: (id: string) => Promise<ConnectionSyncResult | null>;
   connect: (companyId: string, credentials: Record<string, string>, startDate: string) => Promise<ConnectionSyncResult>;
   disconnect: (id: string) => Promise<void>;
+  /** Saves where future syncs of one connection fetch from (YYYY-MM-DD). Throws BankSyncError. */
+  setStartDate: (id: string, startDate: string) => Promise<void>;
+  /** Same date for every connection; resolves to how many updates failed. */
+  setStartDateForAll: (startDate: string) => Promise<number>;
   modalOpen: boolean;
   openModal: () => void;
   closeModal: () => void;
@@ -39,8 +45,9 @@ interface BankSyncContextValue {
 
 export const BankSyncContext = createContext<BankSyncContextValue | null>(null);
 
+/** Due for the startup auto-sync: over 24h since the last sync, or a backfill is pending. */
 function isStale(c: BankConnection) {
-  return !c.lastSyncAt || Date.now() - new Date(c.lastSyncAt).getTime() > AUTO_SYNC_AFTER_MS;
+  return !c.lastSyncAt || Date.now() - new Date(c.lastSyncAt).getTime() > AUTO_SYNC_AFTER_MS || needsBackfill(c);
 }
 
 /**
@@ -104,7 +111,10 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
         setNotice(
           needsAction
             ? { kind: "attention", text: `נדרשת התערבות — ${label}: ${attentionReason(lastErrorCode)}` }
-            : { kind: "error", text: `${label}: ${ERROR_MESSAGES[code]}` },
+            : {
+                kind: "error",
+                text: `${label}: ${err instanceof BankSyncError ? syncErrorMessage(code, err.details) : ERROR_MESSAGES[code]}`,
+              },
         );
         return null;
       } finally {
@@ -125,6 +135,19 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     await removeConnection(id);
     setConnections((prev) => prev.filter((c) => c.id !== id));
   }, []);
+
+  const setStartDate = useCallback(async (id: string, startDate: string) => {
+    replace(await updateConnectionStartDate(id, startDate));
+  }, []);
+
+  const setStartDateForAll = useCallback(
+    async (startDate: string) => {
+      const results = await Promise.allSettled(connections.map((c) => updateConnectionStartDate(c.id, startDate)));
+      for (const r of results) if (r.status === "fulfilled") replace(r.value);
+      return results.filter((r) => r.status === "rejected").length;
+    },
+    [connections],
+  );
 
   // ── Auto-sync on startup ──────────────────────────────────────────
   // Once per app load, after settings and connections are known: sync every
@@ -158,6 +181,8 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     syncNow,
     connect,
     disconnect,
+    setStartDate,
+    setStartDateForAll,
     modalOpen,
     openModal: useCallback(() => setModalOpen(true), []),
     closeModal: useCallback(() => setModalOpen(false), []),

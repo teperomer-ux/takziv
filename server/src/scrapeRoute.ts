@@ -5,7 +5,7 @@ import { requireGoogleUser } from "./auth.js";
 import { sendError } from "./errors.js";
 import { missingLoginFields } from "./scrapeRunner.js";
 import { syncProvider } from "./scraperService.js";
-import { withProviderSlot } from "./connectionSync.js";
+import { isValidStartDate, withProviderSlot } from "./connectionSync.js";
 import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
 const bodySchema = z.object({
@@ -36,8 +36,9 @@ scrapeRouter.post("/api/scrape-transactions", requireGoogleUser, async (req, res
   const missing = missingLoginFields(companyId, credentials);
   if (missing.length) return sendError(res, "MISSING_CREDENTIAL_FIELDS", { missing });
 
+  // Same range as saved connections: not in the future, at most a year back.
+  if (!isValidStartDate(startDate)) return sendError(res, "INVALID_REQUEST", { fields: ["startDate"] });
   const start = new Date(startDate);
-  if (start > new Date()) return sendError(res, "INVALID_REQUEST", { fields: ["startDate"] });
 
   const log = syncLogger({ uid, companyId });
 

@@ -3,6 +3,7 @@ import { Check, Loader2, Plus, RefreshCw, AlertTriangle } from "lucide-react";
 import {
   syncBankTransactions,
   BankSyncError,
+  needsBackfill,
   type BankConnection,
   type BankSyncErrorCode,
   type BankSyncResult,
@@ -10,8 +11,9 @@ import {
 import { useBankSync } from "../hooks/useBankSync";
 import { useSettings } from "../hooks/useSettings";
 import { INSTITUTIONS, findInstitution, type LoginField } from "../constants/institutions";
-import { ERROR_MESSAGES, attentionReason } from "../constants/bankSyncMessages";
+import { ERROR_MESSAGES, attentionReason, syncErrorMessage } from "../constants/bankSyncMessages";
 import type { TransactionSource } from "../types";
+import { formatDate } from "../utils/formatDate";
 
 interface Props {
   onClose: () => void;
@@ -52,6 +54,17 @@ function defaultStartDate(): string {
   return ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1));
 }
 
+/** The range the server accepts for a saved connection's start date: up to a year back, not in the future. */
+function startDateBounds() {
+  const today = new Date();
+  const yearAgo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate() + 1);
+  return { min: ymd(yearAgo), max: ymd(today) };
+}
+
+function startDateError(err: unknown): string {
+  return err instanceof BankSyncError ? syncErrorMessage(err.code, err.details) : ERROR_MESSAGES.INTERNAL_ERROR;
+}
+
 /** "23/10/2026 14:05" */
 function formatSyncTime(iso: string): string {
   const d = new Date(iso);
@@ -71,10 +84,11 @@ type Phase =
   | { name: "form" }
   | { name: "loading" }
   | { name: "success"; result: BankSyncResult; remembered: boolean }
-  | { name: "error"; code: BankSyncErrorCode };
+  | { name: "error"; message: string };
 
 export default function BankSyncModal({ onClose }: Props) {
-  const { connections, connectionsLoaded, syncingId, syncNow, connect, disconnect } = useBankSync();
+  const { connections, connectionsLoaded, syncingId, syncNow, connect, disconnect, setStartDate: saveStartDate } =
+    useBankSync();
   const { settings, updateSettings } = useSettings();
 
   // null = decide from data: the accounts list when something is connected.
@@ -90,8 +104,11 @@ export default function BankSyncModal({ onClose }: Props) {
 
   const institution = findInstitution(companyId) ?? INSTITUTIONS[0];
   const loading = phase.name === "loading";
+  const bounds = startDateBounds();
   const canSubmit =
-    institution.fields.every((f) => (values[f] ?? "").trim().length > 0) && startDate.length > 0;
+    institution.fields.every((f) => (values[f] ?? "").trim().length > 0) &&
+    startDate >= bounds.min &&
+    startDate <= bounds.max;
 
   // Seconds counter shown under the spinner.
   useEffect(() => {
@@ -139,7 +156,10 @@ export default function BankSyncModal({ onClose }: Props) {
         : await syncBankTransactions(companyId, credentials, startDate);
       setPhase({ name: "success", result, remembered: remember });
     } catch (err) {
-      setPhase({ name: "error", code: err instanceof BankSyncError ? err.code : "INTERNAL_ERROR" });
+      setPhase({
+        name: "error",
+        message: err instanceof BankSyncError ? syncErrorMessage(err.code, err.details) : ERROR_MESSAGES.INTERNAL_ERROR,
+      });
     }
   }
 
@@ -184,9 +204,12 @@ export default function BankSyncModal({ onClose }: Props) {
                   onSync={() => syncNow(c.id)}
                   onUpdateCredentials={() => openForm(c.companyId)}
                   onDisconnect={() => disconnect(c.id)}
+                  onSaveStartDate={(date) => saveStartDate(c.id, date)}
                 />
               ))}
             </div>
+
+            {connections.length > 1 && <StartDateForAll />}
 
             {syncingId && (
               <p className="text-[11px] text-slate-400 mt-3 leading-relaxed">
@@ -293,7 +316,7 @@ export default function BankSyncModal({ onClose }: Props) {
             {phase.name === "error" && (
               <div className="py-2">
                 <div role="alert" className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-4 py-3 text-sm text-red-700 dark:text-red-300 leading-relaxed">
-                  {ERROR_MESSAGES[phase.code]}
+                  {phase.message}
                 </div>
                 <div className="flex gap-3 mt-6">
                   <button type="button" onClick={() => setPhase({ name: "form" })} className={`flex-1 ${primaryButton}`}>
@@ -351,7 +374,8 @@ export default function BankSyncModal({ onClose }: Props) {
                   <input
                     type="date"
                     value={startDate}
-                    max={ymd(new Date())}
+                    min={bounds.min}
+                    max={bounds.max}
                     onChange={(e) => setStartDate(e.target.value)}
                     className={inputClass}
                   />
@@ -406,6 +430,7 @@ function ConnectionCard({
   onSync,
   onUpdateCredentials,
   onDisconnect,
+  onSaveStartDate,
 }: {
   connection: BankConnection;
   syncing: boolean;
@@ -413,8 +438,34 @@ function ConnectionCard({
   onSync: () => void;
   onUpdateCredentials: () => void;
   onDisconnect: () => void;
+  onSaveStartDate: (startDate: string) => Promise<void>;
 }) {
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [editingDate, setEditingDate] = useState(false);
+  const [draftDate, setDraftDate] = useState("");
+  const [savingDate, setSavingDate] = useState(false);
+  const [dateError, setDateError] = useState<string | null>(null);
+  const bounds = startDateBounds();
+
+  function startEditing() {
+    setDraftDate(connection.startDate ?? connection.syncedFrom ?? bounds.max);
+    setDateError(null);
+    setEditingDate(true);
+  }
+
+  async function handleSaveDate() {
+    if (!draftDate) return;
+    setSavingDate(true);
+    setDateError(null);
+    try {
+      await onSaveStartDate(draftDate);
+      setEditingDate(false);
+    } catch (err) {
+      setDateError(startDateError(err));
+    } finally {
+      setSavingDate(false);
+    }
+  }
   const institution = findInstitution(connection.companyId);
   const needsAttention = connection.status === "needs_attention";
   const lastFailed = !needsAttention && connection.lastErrorCode;
@@ -454,8 +505,69 @@ function ConnectionCard({
               "טרם סונכרן"
             )}
           </p>
+          {!editingDate && (
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              מושך החל מ:{" "}
+              {connection.startDate ? (
+                <span dir="ltr" className="tabular-nums">{formatDate(connection.startDate)}</span>
+              ) : (
+                "לא הוגדר"
+              )}
+              {needsBackfill(connection) && <span className="text-teal-600 dark:text-teal-400"> · יושלם בסנכרון הבא</span>}{" "}
+              <button
+                type="button"
+                onClick={startEditing}
+                className="text-teal-600 dark:text-teal-400 font-semibold hover:underline px-1"
+              >
+                ערוך
+              </button>
+            </p>
+          )}
         </div>
       </div>
+
+      {editingDate && (
+        <div className="mt-3">
+          <label className="block">
+            <span className={labelClass}>משיכת עסקאות החל מתאריך</span>
+            <input
+              type="date"
+              value={draftDate}
+              min={bounds.min}
+              max={bounds.max}
+              onChange={(e) => setDraftDate(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+          <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+            עד שנה אחורה. תאריך מוקדם יותר יושלם בסנכרון הבא; עסקאות שכבר יובאו לא יימחקו.
+          </p>
+          {dateError && (
+            <p role="alert" className="text-xs text-red-700 dark:text-red-300 mt-2">
+              {dateError}
+            </p>
+          )}
+          <div className="flex gap-2 mt-2">
+            <button
+              type="button"
+              onClick={handleSaveDate}
+              disabled={!draftDate || savingDate}
+              className={`flex-1 inline-flex items-center justify-center gap-2 ${primaryButton}`}
+            >
+              {savingDate && <Loader2 className="h-4 w-4 animate-spin" />}
+              שמור
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditingDate(false)}
+              disabled={savingDate}
+              className={`flex-1 ${secondaryButton}`}
+            >
+              ביטול
+            </button>
+          </div>
+        </div>
+      )}
 
       {needsAttention && (
         <p className="flex items-start gap-1.5 text-xs text-amber-800 dark:text-amber-300 mt-3 leading-relaxed">
@@ -518,6 +630,90 @@ function ConnectionCard({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** One date for every connected account, so banks and cards line up. */
+function StartDateForAll() {
+  const { setStartDateForAll } = useBankSync();
+  const bounds = startDateBounds();
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(defaultStartDate);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+
+  async function handleApply() {
+    if (!date) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const failed = await setStartDateForAll(date);
+      setMessage(
+        failed === 0
+          ? { kind: "success", text: `כל החשבונות יימשכו החל מ-${formatDate(date)}.` }
+          : { kind: "error", text: `העדכון נכשל ב-${failed} חשבונות. נסו שוב.` },
+      );
+      if (failed === 0) setOpen(false);
+    } catch (err) {
+      setMessage({ kind: "error", text: startDateError(err) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-4">
+      {open ? (
+        <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 p-4">
+          <label className="block">
+            <span className={labelClass}>קבע תאריך משיכה לכל החשבונות</span>
+            <input
+              type="date"
+              value={date}
+              min={bounds.min}
+              max={bounds.max}
+              onChange={(e) => setDate(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+          <div className="flex gap-2 mt-3">
+            <button
+              type="button"
+              onClick={handleApply}
+              disabled={!date || saving}
+              className={`flex-1 inline-flex items-center justify-center gap-2 ${primaryButton}`}
+            >
+              {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+              החל על כל החשבונות
+            </button>
+            <button type="button" onClick={() => setOpen(false)} disabled={saving} className={`flex-1 ${secondaryButton}`}>
+              ביטול
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => {
+            setMessage(null);
+            setOpen(true);
+          }}
+          className={`w-full ${secondaryButton}`}
+        >
+          קבע תאריך משיכה לכל החשבונות
+        </button>
+      )}
+      {message && (
+        <p
+          role={message.kind === "error" ? "alert" : "status"}
+          className={`text-xs mt-2 ${
+            message.kind === "error" ? "text-red-700 dark:text-red-300" : "text-emerald-700 dark:text-emerald-400"
+          }`}
+        >
+          {message.text}
+        </p>
+      )}
     </div>
   );
 }

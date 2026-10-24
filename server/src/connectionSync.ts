@@ -35,11 +35,52 @@ export function defaultStartDate() {
   return new Date(now.getFullYear(), now.getMonth() - 1, 1);
 }
 
-function syncStartDate(lastSyncAt: Date | null) {
-  if (!lastSyncAt) return defaultStartDate();
-  const from = new Date(lastSyncAt.getTime() - OVERLAP_DAYS * 86_400_000);
-  const floor = new Date(Date.now() - MAX_LOOKBACK_DAYS * 86_400_000);
-  return from < floor ? floor : from;
+/** defaultStartDate() as YYYY-MM-DD. */
+export function defaultStartYmd() {
+  const d = defaultStartDate();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+const israelYmd = (d: Date) => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jerusalem" }).format(d);
+
+/** A start date the user may pick: YYYY-MM-DD, not in the future, at most MAX_LOOKBACK_DAYS back. */
+export function isValidStartDate(ymd: string, now = new Date()) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd) || Number.isNaN(new Date(ymd).getTime())) return false;
+  // Round-trip rejects impossible dates such as 2026-02-31.
+  if (new Date(ymd).toISOString().slice(0, 10) !== ymd) return false;
+  const earliest = israelYmd(new Date(now.getTime() - MAX_LOOKBACK_DAYS * 86_400_000));
+  return ymd <= israelYmd(now) && ymd >= earliest;
+}
+
+/** True if the user moved the start date before what has been fetched so far. */
+export function needsBackfill(c: Pick<BankConnection, "startDate" | "syncedFrom">) {
+  return !!c.startDate && (!c.syncedFrom || c.startDate < c.syncedFrom);
+}
+
+/**
+ * Where a sync of a saved connection starts:
+ *  - an explicit override (POST …/sync with a startDate) wins, for that sync only;
+ *  - a start date earlier than what's been fetched → backfill from it, once;
+ *  - otherwise incremental: last sync minus OVERLAP_DAYS, never before the
+ *    saved start date, never more than MAX_LOOKBACK_DAYS back.
+ * `fetchedFrom` is set when the sync reaches back to a new earliest date.
+ */
+export function syncWindow(
+  c: Pick<BankConnection, "startDate" | "syncedFrom" | "lastSyncAt">,
+  override?: string,
+  now = new Date(),
+): { start: Date; fetchedFrom?: string } {
+  const explicit = override ?? (needsBackfill(c) ? c.startDate! : undefined);
+  if (explicit) {
+    const reachesFurther = !c.syncedFrom || explicit < c.syncedFrom;
+    return { start: new Date(explicit), ...(reachesFurther && { fetchedFrom: explicit }) };
+  }
+
+  let start = c.lastSyncAt ? new Date(c.lastSyncAt.getTime() - OVERLAP_DAYS * 86_400_000) : defaultStartDate();
+  const floor = new Date(now.getTime() - MAX_LOOKBACK_DAYS * 86_400_000);
+  if (start < floor) start = floor;
+  if (c.startDate && start < new Date(c.startDate)) start = new Date(c.startDate);
+  return { start };
 }
 
 function logLeaseError(event: string, err: unknown) {
@@ -77,13 +118,21 @@ async function withBrowserSlot<T>(fn: () => Promise<T>) {
 
 /**
  * Syncs a saved connection with its stored credentials: lease → status check
- * → decrypt → scrape and save → status update → release.
+ * → decrypt → scrape and save → status update → release. `startDate`
+ * overrides the window for this sync only (see syncWindow).
  *
  * Never retries a login the bank already rejected (status needs_attention) —
  * that's how bank accounts get locked — and flags the connection when the
  * bank rejects it now.
  */
-export async function syncSavedConnection(uid: string, connectionId: string): Promise<SyncResult> {
+export async function syncSavedConnection(
+  uid: string,
+  connectionId: string,
+  { startDate }: { startDate?: string } = {},
+): Promise<SyncResult> {
+  if (startDate !== undefined && !isValidStartDate(startDate)) {
+    throw new ApiError("INVALID_REQUEST", { fields: ["startDate"] });
+  }
   return withBrowserSlot(() =>
     // The lease is checked first, before any status read, so the status can't
     // change between the check and the login: only lease holders write it.
@@ -109,12 +158,18 @@ export async function syncSavedConnection(uid: string, connectionId: string): Pr
           });
         }
 
+        const { start, fetchedFrom } = syncWindow(connection, startDate);
         const outcome = await syncProvider(uid, {
           provider: stored.companyId,
           credentials: stored.credentials,
-          startDate: syncStartDate(connection.lastSyncAt),
+          startDate: start,
         });
-        await updateConnectionStatus(uid, connectionId, { status: "active", lastErrorCode: null, synced: true });
+        await updateConnectionStatus(uid, connectionId, {
+          status: "active",
+          lastErrorCode: null,
+          synced: true,
+          ...(fetchedFrom && { syncedFrom: fetchedFrom }),
+        });
         return { connection: await getConnection(uid, connectionId), outcome };
       } catch (err) {
         const apiErr = err instanceof ApiError ? err : new ApiError("INTERNAL_ERROR", { internalMessage: String(err) });

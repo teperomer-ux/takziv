@@ -43,7 +43,14 @@ export interface BankConnection {
   /** API error code of the last failed sync, cleared on success. */
   lastErrorCode: string | null;
   lastSyncAt: Date | null;
+  /** YYYY-MM-DD the user wants transactions fetched from; null for connections saved before it existed. */
+  startDate: string | null;
+  /** YYYY-MM-DD back to which transactions have actually been fetched. */
+  syncedFrom: string | null;
 }
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+const ymdOrNull = (v: unknown) => (typeof v === "string" && YMD.test(v) ? v : null);
 
 interface SecretDoc {
   uid: string;
@@ -89,6 +96,8 @@ function toConnection(id: string, data: FirebaseFirestore.DocumentData): BankCon
     maskedLogin: data.maskedLogin ?? "•••",
     lastErrorCode: data.lastErrorCode ?? null,
     lastSyncAt: (data.lastSyncAt as Timestamp | null)?.toDate() ?? null,
+    startDate: ymdOrNull(data.startDate),
+    syncedFrom: ymdOrNull(data.syncedFrom),
   };
 }
 
@@ -112,7 +121,7 @@ export async function saveConnection(
   uid: string,
   companyId: CompanyTypes,
   credentials: Record<string, string>,
-  { synced }: { synced: boolean },
+  { synced, startDate }: { synced: boolean; startDate: string },
 ): Promise<BankConnection> {
   const existingId = await findConnectionId(uid, companyId);
   const connectionId = existingId ?? randomUUID();
@@ -135,7 +144,8 @@ export async function saveConnection(
       maskedLogin: maskLogin(companyId, credentials),
       lastErrorCode: null,
       ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null }),
-      ...(synced && { lastSyncAt: FieldValue.serverTimestamp() }),
+      startDate,
+      ...(synced && { lastSyncAt: FieldValue.serverTimestamp(), syncedFrom: startDate }),
     },
     { merge: true },
   );
@@ -157,12 +167,24 @@ export async function loadCredentials(uid: string, connectionId: string) {
 export async function updateConnectionStatus(
   uid: string,
   connectionId: string,
-  update: { status?: ConnectionStatus; lastErrorCode: string | null; synced?: boolean },
+  update: { status?: ConnectionStatus; lastErrorCode: string | null; synced?: boolean; syncedFrom?: string },
 ) {
   const { synced, ...fields } = update;
   await connectionsCol(uid)
     .doc(connectionId)
     .update({ ...fields, ...(synced && { lastSyncAt: FieldValue.serverTimestamp() }) });
+}
+
+/** Sets the date future syncs fetch from. A date before `syncedFrom` makes the next sync backfill to it. */
+export async function updateConnectionStartDate(uid: string, connectionId: string, startDate: string) {
+  try {
+    await connectionsCol(uid).doc(connectionId).update({ startDate });
+  } catch (err) {
+    // gRPC NOT_FOUND: update() requires the doc to exist.
+    if ((err as { code?: number }).code === 5) throw new ConnectionNotFoundError();
+    throw err;
+  }
+  return getConnection(uid, connectionId);
 }
 
 /** Deletes the secret and its status doc together. */

@@ -12,7 +12,7 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173")
 
 const app = express();
 app.disable("x-powered-by");
-app.use(cors({ origin: allowedOrigins, methods: ["GET", "POST", "DELETE"], allowedHeaders: ["Authorization", "Content-Type"] }));
+app.use(cors({ origin: allowedOrigins, methods: ["GET", "POST", "PATCH", "DELETE"], allowedHeaders: ["Authorization", "Content-Type"] }));
 app.use(express.json({ limit: "10kb" }));
 
 app.get("/healthz", (_req, res) => {

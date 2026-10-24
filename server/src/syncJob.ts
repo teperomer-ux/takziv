@@ -12,7 +12,7 @@
  */
 import { ApiError } from "./errors.js";
 import { listActiveConnections } from "./connectionRepository.js";
-import { syncSavedConnection } from "./connectionSync.js";
+import { needsBackfill, syncSavedConnection } from "./connectionSync.js";
 import { MAX_CONCURRENT_SCRAPES, isSyncDue, syncResponseBody } from "./syncSupport.js";
 
 type Outcome = "success" | "skipped" | "error";
@@ -43,7 +43,8 @@ async function main() {
   const startedAt = Date.now();
   const now = new Date();
   const active = await listActiveConnections();
-  const due = active.filter(({ connection }) => isSyncDue(connection.lastSyncAt, now));
+  // Due: stale, or the user moved its start date earlier and it hasn't been backfilled yet.
+  const due = active.filter(({ connection }) => isSyncDue(connection.lastSyncAt, now) || needsBackfill(connection));
   log({ status: "start", active: active.length, due: due.length, concurrency: MAX_CONCURRENT_SCRAPES });
 
   const counts: Record<Outcome, number> = { success: 0, skipped: 0, error: 0 };

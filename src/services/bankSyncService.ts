@@ -45,6 +45,15 @@ export interface BankConnection {
   lastErrorCode: string | null;
   /** ISO timestamp */
   lastSyncAt: string | null;
+  /** YYYY-MM-DD transactions are fetched from; null for connections saved before this existed. */
+  startDate: string | null;
+  /** YYYY-MM-DD back to which transactions have actually been fetched. */
+  syncedFrom: string | null;
+}
+
+/** The start date was moved before what's been fetched; the next sync backfills to it. */
+export function needsBackfill(c: BankConnection): boolean {
+  return !!c.startDate && (!c.syncedFrom || c.startDate < c.syncedFrom);
 }
 
 export interface ConnectionSyncResult extends BankSyncResult {
@@ -61,7 +70,7 @@ export class BankSyncError extends Error {
   }
 }
 
-async function apiRequest<T>(method: "GET" | "POST" | "DELETE", path: string, payload?: unknown): Promise<T> {
+async function apiRequest<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, payload?: unknown): Promise<T> {
   const user = auth.currentUser;
   if (!user) throw new BankSyncError("UNAUTHENTICATED", "Not signed in");
   const token = await user.getIdToken();
@@ -118,9 +127,19 @@ export function connectAccount(
   return apiRequest("POST", "/api/connections", { companyId, credentials, startDate });
 }
 
-/** Syncs a saved connection with its stored credentials. */
-export function syncConnection(id: string): Promise<ConnectionSyncResult> {
-  return apiRequest("POST", `/api/connections/${encodeURIComponent(id)}/sync`);
+/**
+ * Syncs a saved connection with its stored credentials. `startDate`
+ * (YYYY-MM-DD) overrides where this one sync starts; the saved date is kept.
+ */
+export function syncConnection(id: string, startDate?: string): Promise<ConnectionSyncResult> {
+  return apiRequest("POST", `/api/connections/${encodeURIComponent(id)}/sync`, startDate ? { startDate } : undefined);
+}
+
+/** Saves the date future syncs of this connection fetch from (YYYY-MM-DD). */
+export async function updateConnectionStartDate(id: string, startDate: string): Promise<BankConnection> {
+  return (
+    await apiRequest<{ connection: BankConnection }>("PATCH", `/api/connections/${encodeURIComponent(id)}`, { startDate })
+  ).connection;
 }
 
 export async function removeConnection(id: string): Promise<void> {

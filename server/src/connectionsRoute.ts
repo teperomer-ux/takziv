@@ -11,9 +11,10 @@ import {
   deleteConnection,
   listConnections,
   saveConnection,
+  updateConnectionStartDate,
   type BankConnection,
 } from "./connectionRepository.js";
-import { defaultStartDate, syncSavedConnection, withProviderSlot } from "./connectionSync.js";
+import { defaultStartYmd, isValidStartDate, syncSavedConnection, withProviderSlot } from "./connectionSync.js";
 import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
 /**
@@ -30,6 +31,13 @@ const createSchema = z.object({
   startDate: z.iso.date().optional(),
 });
 const idSchema = z.uuid();
+const startDateSchema = z.object({ startDate: z.iso.date() });
+const syncSchema = z.object({ startDate: z.iso.date().optional() });
+
+/** Date fields fail validation as INVALID_REQUEST with `fields: ["startDate"]`, never echoing the value. */
+function invalidStartDate(res: Response) {
+  sendError(res, "INVALID_REQUEST", { fields: ["startDate"] });
+}
 
 function toJson(c: BankConnection) {
   return { ...c, lastSyncAt: c.lastSyncAt?.toISOString() ?? null };
@@ -69,8 +77,9 @@ connectionsRouter.post("/api/connections", async (req, res) => {
   const missing = missingLoginFields(companyId, credentials);
   if (missing.length) return sendError(res, "MISSING_CREDENTIAL_FIELDS", { missing });
 
-  const startDate = parsed.data.startDate ? new Date(parsed.data.startDate) : defaultStartDate();
-  if (startDate > new Date()) return sendError(res, "INVALID_REQUEST", { fields: ["startDate"] });
+  const startYmd = parsed.data.startDate ?? defaultStartYmd();
+  if (!isValidStartDate(startYmd)) return invalidStartDate(res);
+  const startDate = new Date(startYmd);
 
   try {
     assertVaultReady();
@@ -83,7 +92,10 @@ connectionsRouter.post("/api/connections", async (req, res) => {
   try {
     const { result, connection } = await withProviderSlot(uid, companyId, async () => {
       const result = await syncProvider(uid, { provider: companyId, credentials: credentials!, startDate });
-      return { result, connection: await saveConnection(uid, companyId, credentials!, { synced: true }) };
+      return {
+        result,
+        connection: await saveConnection(uid, companyId, credentials!, { synced: true, startDate: startYmd }),
+      };
     });
     credentials = undefined;
     const body = syncResponseBody(result);
@@ -96,15 +108,41 @@ connectionsRouter.post("/api/connections", async (req, res) => {
   }
 });
 
-/** Syncs a saved connection with its stored credentials (see connectionSync.ts). */
+/**
+ * Changes where a saved connection fetches from. Moving it earlier makes the
+ * next sync backfill to the new date; moving it later only stops future syncs
+ * from going back that far (already-imported rows stay).
+ */
+connectionsRouter.patch("/api/connections/:id", async (req, res) => {
+  const id = parseId(req.params.id, res);
+  if (!id) return;
+  const parsed = startDateSchema.safeParse(req.body ?? {});
+  if (!parsed.success || !isValidStartDate(parsed.data.startDate)) return invalidStartDate(res);
+
+  try {
+    const connection = await updateConnectionStartDate(res.locals.uid, id, parsed.data.startDate);
+    res.json({ success: true, connection: toJson(connection) });
+  } catch (err) {
+    if (err instanceof ConnectionNotFoundError) return sendError(res, "CONNECTION_NOT_FOUND");
+    console.error(JSON.stringify({ event: "update_connection_failed", error: String(err) }));
+    sendError(res, "INTERNAL_ERROR");
+  }
+});
+
+/**
+ * Syncs a saved connection with its stored credentials (see connectionSync.ts).
+ * An optional `{ startDate }` body overrides the window for this sync only.
+ */
 connectionsRouter.post("/api/connections/:id/sync", async (req, res) => {
   const uid: string = res.locals.uid;
   const id = parseId(req.params.id, res);
   if (!id) return;
+  const parsed = syncSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return invalidStartDate(res);
 
   const log = syncLogger({ uid, connectionId: id, via: "saved" });
   try {
-    const { connection, outcome } = await syncSavedConnection(uid, id);
+    const { connection, outcome } = await syncSavedConnection(uid, id, { startDate: parsed.data.startDate });
     const body = syncResponseBody(outcome);
     log("success", { companyId: connection.companyId, saved: body.savedCount });
     res.json({ success: true, companyId: connection.companyId, connection: toJson(connection), ...body });
