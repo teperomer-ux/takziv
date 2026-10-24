@@ -1,0 +1,9 @@
+# Builds server/Dockerfile from the repo root (the server reuses classifiers
+# from src/utils) and pushes it to Artifact Registry. Used by
+# infra/deploy-sync-job.sh:
+#   gcloud builds submit . --config server/cloudbuild.yaml --substitutions _IMAGE=<image:tag>
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "server/Dockerfile", "-t", "${_IMAGE}", "."]
+images:
+  - "${_IMAGE}"

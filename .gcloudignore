@@ -1,0 +1,15 @@
+# What `gcloud builds submit` uploads. Never ship local secrets or build output
+# to Cloud Build; mirrors .dockerignore.
+.gcloudignore
+.git
+.claude
+**/node_modules
+**/build
+dist
+.env
+.env.*
+server/.env
+server/.secrets
+*-firebase-adminsdk-*.json
+service-account*.json
+*.tsbuildinfo
