@@ -10,8 +10,9 @@ COPY server/package.json server/package-lock.json ./
 RUN npm ci
 COPY server/tsconfig.json ./
 COPY server/src ./src
-COPY src/types/index.ts /app/src/types/index.ts
-COPY src/utils/classifier.ts src/utils/incomeClassifier.ts src/utils/bankReconciliation.ts /app/src/utils/
+# The shared modules listed in server/tsconfig.json; only those are compiled.
+COPY src/types /app/src/types
+COPY src/utils /app/src/utils
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
