@@ -1,10 +1,11 @@
 import { useCallback, useState } from "react";
-import { Trash2, RefreshCw } from "lucide-react";
+import { Trash2, RefreshCw, Pencil } from "lucide-react";
 import type { Transaction } from "../types";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
 import { useCategories } from "../hooks/useCategories";
 import BankSyncModal from "./BankSyncModal";
 import ConfirmDialog from "./ConfirmDialog";
+import { formatDate } from "../utils/formatDate";
 import { isExcludedFromTotals, splitTotals } from "../utils/internalTransfers";
 
 const MONTH_NAMES = [
@@ -57,6 +58,8 @@ export default function IncomeList({
   const [addingSubFor, setAddingSubFor] = useState<string | null>(null);
   const [newCatName, setNewCatName] = useState("");
   const [newSubName, setNewSubName] = useState("");
+  /** Income row whose date and description are open for editing. */
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -224,57 +227,68 @@ export default function IncomeList({
           return (
           <div
             key={tx.id}
-            className={`rounded-2xl p-4 shadow-sm border ${
+            dir="rtl"
+            className={`rounded-2xl px-4 py-3 shadow-sm border space-y-2.5 ${
               excluded
                 ? "bg-slate-50 dark:bg-slate-900/50 border-dashed border-slate-300 dark:border-slate-700"
                 : "bg-white dark:bg-slate-900 border-slate-200/60 dark:border-slate-700/60"
             }`}
           >
-            {excluded && (
-              <div className="flex justify-end mb-2">
-              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                לא נספר בהכנסות
+            {/* Top line: date ↔ amount */}
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 tabular-nums" dir="ltr">
+                {formatDate(tx.date)}
               </span>
-              </div>
-            )}
+              <span
+                className={`font-bold text-sm whitespace-nowrap tabular-nums ${excluded ? "text-slate-400" : "text-emerald-600"}`}
+                dir="ltr"
+              >
+                +{tx.amount.toLocaleString("he-IL")} ₪
+              </span>
+            </div>
 
-            {/* Row 1: date, description, amount */}
-            <div className="flex items-center justify-between gap-2 mb-3">
-              <div className="flex items-center gap-3 min-w-0">
+            {/* Middle line: the full description, wrapped — never truncated */}
+            {editingId === tx.id ? (
+              <div className="space-y-2">
                 <input
                   type="date"
                   value={tx.date}
                   onChange={(e) => onUpdate(tx.id, "date", e.target.value)}
-                  className="w-[130px] shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
+                  aria-label="תאריך"
+                  className="w-[150px] rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
                   dir="ltr"
                 />
-                <input
-                  type="text"
+                <textarea
                   value={tx.description}
                   onChange={(e) => onUpdate(tx.id, "description", e.target.value)}
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  rows={Math.max(2, Math.ceil(tx.description.length / 40))}
+                  aria-label="תיאור"
                   placeholder="תיאור"
+                  className="block w-full resize-y rounded-lg border border-emerald-500 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm leading-snug"
+                  autoFocus
                 />
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setEditingId(null)}
+                    className="rounded-lg bg-emerald-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-emerald-700 transition-colors"
+                  >
+                    סיום
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <span className={`font-bold text-sm whitespace-nowrap ${excluded ? "text-slate-400" : "text-emerald-600"}`}>
-                  +{tx.amount.toLocaleString("he-IL")} ₪
-                </span>
-                <button
-                  onClick={() => setPendingDelete(tx)}
-                  className="text-slate-300 hover:text-danger transition-colors p-1"
-                  aria-label="מחק הכנסה"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                  </svg>
-                </button>
-              </div>
-            </div>
+            ) : (
+              <p className="text-sm font-medium text-slate-800 dark:text-slate-200 whitespace-normal break-words leading-snug select-text">
+                {tx.description || "הכנסה ללא תיאור"}
+              </p>
+            )}
 
-            {/* Row 2: category + sub-category */}
-            <div className="flex gap-2">
-              <div className="flex-1">
+            {/* Bottom line: classification, badge, actions */}
+            <div className="flex flex-wrap items-center gap-2 pt-2.5 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex flex-1 min-w-[12rem] gap-2">
+              <div className="flex-1 min-w-0">
                 {addingCatFor === tx.id ? (
                   <div className="flex gap-1">
                     <input
@@ -326,7 +340,7 @@ export default function IncomeList({
                 )}
               </div>
 
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 {addingSubFor === tx.id ? (
                   <div className="flex gap-1">
                     <input
@@ -375,6 +389,32 @@ export default function IncomeList({
                     {tx.category && <option value={ADD_NEW}>+ הוסף תת סעיף...</option>}
                   </select>
                 )}
+              </div>
+              </div>
+
+              <div className="flex items-center gap-1 ms-auto">
+                {excluded && (
+                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                    לא נספר בהכנסות
+                  </span>
+                )}
+                <button
+                  onClick={() => setEditingId(editingId === tx.id ? null : tx.id)}
+                  className="text-slate-300 hover:text-slate-500 dark:hover:text-slate-300 transition-colors p-1.5"
+                  aria-label="ערוך תאריך ותיאור"
+                  title="ערוך תאריך ותיאור"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => setPendingDelete(tx)}
+                  className="text-slate-300 hover:text-danger transition-colors p-1.5"
+                  aria-label="מחק הכנסה"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                  </svg>
+                </button>
               </div>
             </div>
           </div>
