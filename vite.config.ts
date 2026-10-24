@@ -6,6 +6,12 @@ import { VitePWA } from "vite-plugin-pwa";
 const BRAND_COLOR = "#0f766e"; // --color-primary (teal-700), the header colour
 
 export default defineConfig({
+  server: {
+    // Used when VITE_API_BASE_URL is empty (npm run dev:lan): the app calls
+    // /api on its own origin, so a phone on the LAN reaches the sync server
+    // through Vite instead of its own "localhost".
+    proxy: { "/api": "http://localhost:8080" },
+  },
   plugins: [
     react(),
     tailwindcss(),

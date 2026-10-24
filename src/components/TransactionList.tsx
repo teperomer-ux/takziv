@@ -14,6 +14,7 @@ import {
 } from "../services/additionalExpenseService";
 import BankSyncModal from "./BankSyncModal";
 import AddExpenseModal from "./AddExpenseModal";
+import ConfirmDialog from "./ConfirmDialog";
 
 const MONTH_NAMES = [
   "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
@@ -189,6 +190,17 @@ export default function TransactionList({
     () => displayedTransactions.filter((tx) => tx.status === "draft").length,
     [displayedTransactions],
   );
+
+  // Row pending a delete confirmation — a card transaction or a manual expense.
+  const [pendingDelete, setPendingDelete] = useState<
+    { description: string; amount: number; remove: () => void } | null
+  >(null);
+  const cancelDelete = useCallback(() => setPendingDelete(null), []);
+
+  function confirmDelete() {
+    pendingDelete?.remove();
+    setPendingDelete(null);
+  }
 
   const handleConfirm = useCallback(
     (tx: Transaction) => {
@@ -390,7 +402,13 @@ export default function TransactionList({
                 {tx.amount.toLocaleString("he-IL")} ₪
               </span>
               <button
-                onClick={() => onDelete(tx.id)}
+                onClick={() =>
+                  setPendingDelete({
+                    description: tx.description || "בית עסק",
+                    amount: tx.amount,
+                    remove: () => onDelete(tx.id),
+                  })
+                }
                 className="text-slate-300 hover:text-danger hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors p-1.5 rounded-lg"
                 aria-label={isDraft ? "מחק טיוטה" : "מחק עסקה"}
                 title={isDraft ? "מחק טיוטה (לא תיובא שוב בסנכרון)" : "מחק עסקה"}
@@ -562,7 +580,13 @@ export default function TransactionList({
                   {exp.amount.toLocaleString("he-IL")} ₪
                 </span>
                 <button
-                  onClick={() => handleDeleteManualExpense(exp.id)}
+                  onClick={() =>
+                    setPendingDelete({
+                      description: exp.description,
+                      amount: exp.amount,
+                      remove: () => handleDeleteManualExpense(exp.id),
+                    })
+                  }
                   className="p-1.5 rounded-lg text-slate-300 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
                   aria-label="מחק הוצאה"
                 >
@@ -576,6 +600,19 @@ export default function TransactionList({
 
       {/* ── Bank Sync Modal ─────────────────────────────────────── */}
       {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
+
+      {/* ── Delete confirmation ──────────────────────────────────── */}
+      {pendingDelete && (
+        <ConfirmDialog title="האם למחוק הוצאה זו?" confirmLabel="כן, מחק" onConfirm={confirmDelete} onCancel={cancelDelete}>
+          {pendingDelete.description || "הוצאה ללא תיאור"} ·{" "}
+          <span
+            className={`font-semibold whitespace-nowrap ${pendingDelete.amount < 0 ? "text-emerald-600" : "text-rose-600"}`}
+            dir="ltr"
+          >
+            {pendingDelete.amount.toLocaleString("he-IL")} ₪
+          </span>
+        </ConfirmDialog>
+      )}
 
       {/* ── Add Expense Modal ─────────────────────────────────── */}
       {expenseModalKind && (

@@ -178,65 +178,244 @@ export default function BankSyncModal({ onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-labelledby="bank-sync-title"
-        className="relative w-full max-w-sm max-h-[90vh] overflow-y-auto rounded-2xl bg-white dark:bg-slate-900 p-6 shadow-xl border border-slate-200/60 dark:border-slate-700/60"
+        className="relative w-full max-w-sm max-h-[85vh] flex flex-col overflow-hidden rounded-2xl bg-white dark:bg-slate-900 shadow-xl border border-slate-200/60 dark:border-slate-700/60"
       >
-        <h2 id="bank-sync-title" className="text-lg font-bold text-slate-800 dark:text-white mb-1">
-          {title}
-        </h2>
-        <p className="text-xs text-slate-400 mb-5">ייבוא אוטומטי של העסקאות ישירות מהבנק או מחברת האשראי</p>
+        {/* Header — stays put while the body scrolls */}
+        <div className="shrink-0 px-6 pt-6 pb-4">
+          <h2 id="bank-sync-title" className="text-lg font-bold text-slate-800 dark:text-white mb-1">
+            {title}
+          </h2>
+          <p className="text-xs text-slate-400">ייבוא אוטומטי של העסקאות ישירות מהבנק או מחברת האשראי</p>
+        </div>
 
-        {/* ══ Connected accounts ═══════════════════════════════════ */}
-        {currentView === "list" && (
-          <div>
-            {!connectionsLoaded && (
-              <div className="flex justify-center py-6">
-                <Loader2 className="h-6 w-6 animate-spin text-teal-600" />
+        {/* Body — min-h-0 lets it shrink below its content so it scrolls */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-6 pb-6">
+          {/* ══ Connected accounts ═══════════════════════════════════ */}
+          {currentView === "list" && (
+            <div>
+              {!connectionsLoaded && (
+                <div className="flex justify-center py-6">
+                  <Loader2 className="h-6 w-6 animate-spin text-teal-600" />
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {connections.map((c) => (
+                  <ConnectionCard
+                    key={c.id}
+                    connection={c}
+                    syncing={syncingId === c.id}
+                    anotherSyncing={syncingId !== null && syncingId !== c.id}
+                    onSync={() => syncNow(c.id)}
+                    onUpdateCredentials={() => openForm(c.companyId)}
+                    onDisconnect={() => disconnect(c.id)}
+                    onSaveStartDate={(date) => saveStartDate(c.id, date)}
+                  />
+                ))}
               </div>
-            )}
 
-            <div className="space-y-3">
-              {connections.map((c) => (
-                <ConnectionCard
-                  key={c.id}
-                  connection={c}
-                  syncing={syncingId === c.id}
-                  anotherSyncing={syncingId !== null && syncingId !== c.id}
-                  onSync={() => syncNow(c.id)}
-                  onUpdateCredentials={() => openForm(c.companyId)}
-                  onDisconnect={() => disconnect(c.id)}
-                  onSaveStartDate={(date) => saveStartDate(c.id, date)}
+              {syncingId && (
+                <p className="text-[11px] text-slate-400 mt-3 leading-relaxed">
+                  הסנכרון ממשיך ברקע — אפשר לסגור את החלון ולהמשיך לעבוד.
+                </p>
+              )}
+
+              {/* Auto-sync toggle */}
+              <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 px-4 py-3 mt-5 cursor-pointer">
+                <span>
+                  <span className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                    סנכרן אוטומטית בכניסה למערכת
+                  </span>
+                  <span className="block text-[11px] text-slate-400 mt-0.5">
+                    בפתיחת האפליקציה, אם עברו יותר מ-24 שעות מהסנכרון האחרון
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={settings.autoSyncOnStartup}
+                  onChange={(e) => updateSettings({ autoSyncOnStartup: e.target.checked })}
+                  className="h-5 w-9 shrink-0 appearance-none rounded-full bg-slate-300 dark:bg-slate-600 checked:bg-teal-600 relative cursor-pointer transition-colors before:absolute before:top-0.5 before:start-0.5 before:h-4 before:w-4 before:rounded-full before:bg-white before:transition-transform checked:before:-translate-x-4"
                 />
-              ))}
+              </label>
             </div>
+          )}
 
+          {/* ══ Connect / one-off sync form ══════════════════════════ */}
+          {currentView === "form" && (
+            <>
+              {/* ── Loading ─────────────────────────────────────────── */}
+              {loading && (
+                <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
+                  <svg className="h-10 w-10 animate-spin text-teal-600 mb-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                    מתחברים ל{institution.label} ומושכים עסקאות…
+                  </p>
+                  <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                    התהליך נמשך בדרך כלל 30–60 שניות.
+                    <br />
+                    אנא אל תסגרו את החלון.
+                  </p>
+                  <p className="text-xs text-slate-400 mt-3 tabular-nums" dir="ltr">{elapsed}s</p>
+                </div>
+              )}
+
+              {/* ── Success ─────────────────────────────────────────── */}
+              {phase.name === "success" && (
+                <div className="text-center py-4" role="status">
+                  <div className="mx-auto mb-4 h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center">
+                    <Check className="h-6 w-6 text-emerald-600" />
+                  </div>
+                  <p className="text-base font-bold text-slate-800 dark:text-white">
+                    {phase.result.savedCount > 0
+                      ? `נוספו ${phase.result.savedCount.toLocaleString("he-IL")} עסקאות חדשות`
+                      : "לא נמצאו עסקאות חדשות"}
+                  </p>
+                  <div className="text-xs text-slate-400 mt-2 space-y-0.5">
+                    {phase.remembered && <p className="text-emerald-600 font-medium">{institution.label} מחובר — מעכשיו הסנכרון בלחיצה אחת.</p>}
+                    {phase.result.savedIncomeCount > 0 && (
+                      <p>
+                        {phase.result.savedExpenseCount} הוצאות ו-{phase.result.savedIncomeCount} הכנסות
+                      </p>
+                    )}
+                    {phase.result.skippedCardPaymentCount > 0 && (
+                      <p>{phase.result.skippedCardPaymentCount} חיובי כרטיסי אשראי דולגו — סנכרנו את הכרטיס עצמו לפירוט</p>
+                    )}
+                    {phase.result.duplicateCount > 0 && (
+                      <p>{phase.result.duplicateCount} עסקאות כבר היו קיימות ולא שוכפלו</p>
+                    )}
+                    {phase.result.skippedPendingCount > 0 && (
+                      <p>{phase.result.skippedPendingCount} עסקאות בהמתנה ייובאו לאחר שייקלטו סופית</p>
+                    )}
+                    {phase.result.savedCount > 0 && <p>העסקאות נשמרו כטיוטה — מומלץ לעבור על הסיווג.</p>}
+                  </div>
+                  <div className="flex gap-3 mt-6">
+                    {connections.length > 0 && (
+                      <button type="button" onClick={() => setView("list")} className={`flex-1 ${secondaryButton}`}>
+                        לחשבונות המחוברים
+                      </button>
+                    )}
+                    <button type="button" onClick={onClose} className={`flex-1 ${primaryButton}`}>
+                      סגור
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Error ───────────────────────────────────────────── */}
+              {phase.name === "error" && (
+                <div className="py-2">
+                  <div role="alert" className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-4 py-3 text-sm text-red-700 dark:text-red-300 leading-relaxed">
+                    {phase.message}
+                  </div>
+                  <div className="flex gap-3 mt-6">
+                    <button type="button" onClick={() => setPhase({ name: "form" })} className={`flex-1 ${primaryButton}`}>
+                      נסה שוב
+                    </button>
+                    <button type="button" onClick={onClose} className={`flex-1 ${secondaryButton}`}>
+                      סגור
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Form ────────────────────────────────────────────── */}
+              {phase.name === "form" && (
+                <form onSubmit={handleSubmit} autoComplete="off">
+                  <label className="block mb-4">
+                    <span className={labelClass}>בנק / חברת אשראי</span>
+                    <select value={companyId} onChange={(e) => selectInstitution(e.target.value)} className={inputClass}>
+                      <optgroup label="בנקים">
+                        {INSTITUTIONS.filter((i) => i.kind === "bank").map((i) => (
+                          <option key={i.id} value={i.id}>{i.label}</option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="כרטיסי אשראי">
+                        {INSTITUTIONS.filter((i) => i.kind === "card").map((i) => (
+                          <option key={i.id} value={i.id}>{i.label}</option>
+                        ))}
+                      </optgroup>
+                    </select>
+                  </label>
+
+                  {institution.fields.map((field, idx) => {
+                    const meta = FIELD_META[field];
+                    return (
+                      <label key={`${companyId}-${field}`} className="block mb-4">
+                        <span className={labelClass}>{meta.label}</span>
+                        <input
+                          type={meta.type}
+                          inputMode={meta.inputMode}
+                          maxLength={meta.maxLength}
+                          autoComplete={meta.autoComplete}
+                          value={values[field] ?? ""}
+                          onChange={(e) => setValues((v) => ({ ...v, [field]: e.target.value }))}
+                          className={inputClass}
+                          dir="ltr"
+                          autoFocus={idx === 0}
+                          spellCheck={false}
+                        />
+                      </label>
+                    );
+                  })}
+
+                  <label className="block mb-4">
+                    <span className={labelClass}>ייבוא עסקאות החל מתאריך</span>
+                    <input
+                      type="date"
+                      value={startDate}
+                      min={bounds.min}
+                      max={bounds.max}
+                      onChange={(e) => setStartDate(e.target.value)}
+                      className={inputClass}
+                    />
+                  </label>
+
+                  <label className="flex items-center gap-2 mb-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={remember}
+                      onChange={(e) => setRemember(e.target.checked)}
+                      className="h-4 w-4 rounded accent-teal-600"
+                    />
+                    <span className="text-sm text-slate-700 dark:text-slate-200">שמור את החיבור לסנכרון בלחיצה אחת</span>
+                  </label>
+
+                  <p className="flex items-start gap-2 text-[11px] text-slate-400 leading-relaxed mb-5">
+                    <svg className="h-3.5 w-3.5 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                      <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
+                    </svg>
+                    {remember
+                      ? "פרטי ההתחברות נשמרים מוצפנים בשרת הסנכרון, רק אם ההתחברות הצליחה, ולעולם אינם נשלחים חזרה לדפדפן."
+                      : "פרטי ההתחברות נשלחים בחיבור מוצפן, משמשים לסנכרון הזה בלבד ואינם נשמרים."}
+                  </p>
+
+                  <div className="flex gap-3">
+                    <button type="submit" disabled={!canSubmit} className={`flex-1 ${primaryButton}`}>
+                      {remember ? "התחבר וסנכרן" : "סנכרן"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={connections.length > 0 ? () => setView("list") : onClose}
+                      className={`flex-1 ${secondaryButton}`}
+                    >
+                      {connections.length > 0 ? "חזרה" : "ביטול"}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer — list-view actions, always visible however long the list gets */}
+        {currentView === "list" && (
+          <div className="shrink-0 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 px-6 py-4 space-y-3">
             {connections.length > 1 && <StartDateForAll />}
-
-            {syncingId && (
-              <p className="text-[11px] text-slate-400 mt-3 leading-relaxed">
-                הסנכרון ממשיך ברקע — אפשר לסגור את החלון ולהמשיך לעבוד.
-              </p>
-            )}
-
-            {/* Auto-sync toggle */}
-            <label className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 px-4 py-3 mt-5 cursor-pointer">
-              <span>
-                <span className="block text-sm font-medium text-slate-700 dark:text-slate-200">
-                  סנכרן אוטומטית בכניסה למערכת
-                </span>
-                <span className="block text-[11px] text-slate-400 mt-0.5">
-                  בפתיחת האפליקציה, אם עברו יותר מ-24 שעות מהסנכרון האחרון
-                </span>
-              </span>
-              <input
-                type="checkbox"
-                role="switch"
-                checked={settings.autoSyncOnStartup}
-                onChange={(e) => updateSettings({ autoSyncOnStartup: e.target.checked })}
-                className="h-5 w-9 shrink-0 appearance-none rounded-full bg-slate-300 dark:bg-slate-600 checked:bg-teal-600 relative cursor-pointer transition-colors before:absolute before:top-0.5 before:start-0.5 before:h-4 before:w-4 before:rounded-full before:bg-white before:transition-transform checked:before:-translate-x-4"
-              />
-            </label>
-
-            <div className="flex gap-3 mt-5">
+            <div className="flex gap-3">
               <button type="button" onClick={() => openForm()} className={`flex-1 inline-flex items-center justify-center gap-1.5 ${secondaryButton}`}>
                 <Plus className="h-4 w-4" />
                 חיבור חשבון נוסף
@@ -246,175 +425,6 @@ export default function BankSyncModal({ onClose }: Props) {
               </button>
             </div>
           </div>
-        )}
-
-        {/* ══ Connect / one-off sync form ══════════════════════════ */}
-        {currentView === "form" && (
-          <>
-            {/* ── Loading ─────────────────────────────────────────── */}
-            {loading && (
-              <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
-                <svg className="h-10 w-10 animate-spin text-teal-600 mb-4" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                  <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-90" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                </svg>
-                <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-                  מתחברים ל{institution.label} ומושכים עסקאות…
-                </p>
-                <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-                  התהליך נמשך בדרך כלל 30–60 שניות.
-                  <br />
-                  אנא אל תסגרו את החלון.
-                </p>
-                <p className="text-xs text-slate-400 mt-3 tabular-nums" dir="ltr">{elapsed}s</p>
-              </div>
-            )}
-
-            {/* ── Success ─────────────────────────────────────────── */}
-            {phase.name === "success" && (
-              <div className="text-center py-4" role="status">
-                <div className="mx-auto mb-4 h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center">
-                  <Check className="h-6 w-6 text-emerald-600" />
-                </div>
-                <p className="text-base font-bold text-slate-800 dark:text-white">
-                  {phase.result.savedCount > 0
-                    ? `נוספו ${phase.result.savedCount.toLocaleString("he-IL")} עסקאות חדשות`
-                    : "לא נמצאו עסקאות חדשות"}
-                </p>
-                <div className="text-xs text-slate-400 mt-2 space-y-0.5">
-                  {phase.remembered && <p className="text-emerald-600 font-medium">{institution.label} מחובר — מעכשיו הסנכרון בלחיצה אחת.</p>}
-                  {phase.result.savedIncomeCount > 0 && (
-                    <p>
-                      {phase.result.savedExpenseCount} הוצאות ו-{phase.result.savedIncomeCount} הכנסות
-                    </p>
-                  )}
-                  {phase.result.skippedCardPaymentCount > 0 && (
-                    <p>{phase.result.skippedCardPaymentCount} חיובי כרטיסי אשראי דולגו — סנכרנו את הכרטיס עצמו לפירוט</p>
-                  )}
-                  {phase.result.duplicateCount > 0 && (
-                    <p>{phase.result.duplicateCount} עסקאות כבר היו קיימות ולא שוכפלו</p>
-                  )}
-                  {phase.result.skippedPendingCount > 0 && (
-                    <p>{phase.result.skippedPendingCount} עסקאות בהמתנה ייובאו לאחר שייקלטו סופית</p>
-                  )}
-                  {phase.result.savedCount > 0 && <p>העסקאות נשמרו כטיוטה — מומלץ לעבור על הסיווג.</p>}
-                </div>
-                <div className="flex gap-3 mt-6">
-                  {connections.length > 0 && (
-                    <button type="button" onClick={() => setView("list")} className={`flex-1 ${secondaryButton}`}>
-                      לחשבונות המחוברים
-                    </button>
-                  )}
-                  <button type="button" onClick={onClose} className={`flex-1 ${primaryButton}`}>
-                    סגור
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* ── Error ───────────────────────────────────────────── */}
-            {phase.name === "error" && (
-              <div className="py-2">
-                <div role="alert" className="rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 px-4 py-3 text-sm text-red-700 dark:text-red-300 leading-relaxed">
-                  {phase.message}
-                </div>
-                <div className="flex gap-3 mt-6">
-                  <button type="button" onClick={() => setPhase({ name: "form" })} className={`flex-1 ${primaryButton}`}>
-                    נסה שוב
-                  </button>
-                  <button type="button" onClick={onClose} className={`flex-1 ${secondaryButton}`}>
-                    סגור
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* ── Form ────────────────────────────────────────────── */}
-            {phase.name === "form" && (
-              <form onSubmit={handleSubmit} autoComplete="off">
-                <label className="block mb-4">
-                  <span className={labelClass}>בנק / חברת אשראי</span>
-                  <select value={companyId} onChange={(e) => selectInstitution(e.target.value)} className={inputClass}>
-                    <optgroup label="בנקים">
-                      {INSTITUTIONS.filter((i) => i.kind === "bank").map((i) => (
-                        <option key={i.id} value={i.id}>{i.label}</option>
-                      ))}
-                    </optgroup>
-                    <optgroup label="כרטיסי אשראי">
-                      {INSTITUTIONS.filter((i) => i.kind === "card").map((i) => (
-                        <option key={i.id} value={i.id}>{i.label}</option>
-                      ))}
-                    </optgroup>
-                  </select>
-                </label>
-
-                {institution.fields.map((field, idx) => {
-                  const meta = FIELD_META[field];
-                  return (
-                    <label key={`${companyId}-${field}`} className="block mb-4">
-                      <span className={labelClass}>{meta.label}</span>
-                      <input
-                        type={meta.type}
-                        inputMode={meta.inputMode}
-                        maxLength={meta.maxLength}
-                        autoComplete={meta.autoComplete}
-                        value={values[field] ?? ""}
-                        onChange={(e) => setValues((v) => ({ ...v, [field]: e.target.value }))}
-                        className={inputClass}
-                        dir="ltr"
-                        autoFocus={idx === 0}
-                        spellCheck={false}
-                      />
-                    </label>
-                  );
-                })}
-
-                <label className="block mb-4">
-                  <span className={labelClass}>ייבוא עסקאות החל מתאריך</span>
-                  <input
-                    type="date"
-                    value={startDate}
-                    min={bounds.min}
-                    max={bounds.max}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className={inputClass}
-                  />
-                </label>
-
-                <label className="flex items-center gap-2 mb-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={remember}
-                    onChange={(e) => setRemember(e.target.checked)}
-                    className="h-4 w-4 rounded accent-teal-600"
-                  />
-                  <span className="text-sm text-slate-700 dark:text-slate-200">שמור את החיבור לסנכרון בלחיצה אחת</span>
-                </label>
-
-                <p className="flex items-start gap-2 text-[11px] text-slate-400 leading-relaxed mb-5">
-                  <svg className="h-3.5 w-3.5 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                    <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-                  </svg>
-                  {remember
-                    ? "פרטי ההתחברות נשמרים מוצפנים בשרת הסנכרון, רק אם ההתחברות הצליחה, ולעולם אינם נשלחים חזרה לדפדפן."
-                    : "פרטי ההתחברות נשלחים בחיבור מוצפן, משמשים לסנכרון הזה בלבד ואינם נשמרים."}
-                </p>
-
-                <div className="flex gap-3">
-                  <button type="submit" disabled={!canSubmit} className={`flex-1 ${primaryButton}`}>
-                    {remember ? "התחבר וסנכרן" : "סנכרן"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={connections.length > 0 ? () => setView("list") : onClose}
-                    className={`flex-1 ${secondaryButton}`}
-                  >
-                    {connections.length > 0 ? "חזרה" : "ביטול"}
-                  </button>
-                </div>
-              </form>
-            )}
-          </>
         )}
       </div>
     </div>
@@ -663,7 +673,7 @@ function StartDateForAll() {
   }
 
   return (
-    <div className="mt-4">
+    <div>
       {open ? (
         <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 p-4">
           <label className="block">

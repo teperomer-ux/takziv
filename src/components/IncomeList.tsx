@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Trash2, RefreshCw } from "lucide-react";
 import type { Transaction } from "../types";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
 import BankSyncModal from "./BankSyncModal";
+import ConfirmDialog from "./ConfirmDialog";
 
 const MONTH_NAMES = [
   "ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני",
@@ -53,6 +54,14 @@ export default function IncomeList({
   const [deleting, setDeleting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [syncOpen, setSyncOpen] = useState(false);
+  /** Income row waiting for the user to confirm its deletion. */
+  const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
+  const cancelDelete = useCallback(() => setPendingDelete(null), []);
+
+  function confirmDelete() {
+    if (pendingDelete) onDelete(pendingDelete.id);
+    setPendingDelete(null);
+  }
 
   async function handleAddCategory(txId: string) {
     const trimmed = newCatName.trim();
@@ -114,6 +123,15 @@ export default function IncomeList({
 
   return (
     <section>
+      {pendingDelete && (
+        <ConfirmDialog title="האם למחוק הכנסה זו?" confirmLabel="כן, מחק" onConfirm={confirmDelete} onCancel={cancelDelete}>
+          {pendingDelete.description || "הכנסה ללא תיאור"} ·{" "}
+          <span className="font-semibold text-emerald-600 whitespace-nowrap" dir="ltr">
+            +{pendingDelete.amount.toLocaleString("he-IL")} ₪
+          </span>
+        </ConfirmDialog>
+      )}
+
       {/* Toast */}
       {toast && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 rounded-lg bg-slate-800 text-white px-4 py-2.5 text-sm shadow-lg animate-[fadeIn_0.2s_ease-out]">
@@ -204,7 +222,7 @@ export default function IncomeList({
                   +{tx.amount.toLocaleString("he-IL")} ₪
                 </span>
                 <button
-                  onClick={() => onDelete(tx.id)}
+                  onClick={() => setPendingDelete(tx)}
                   className="text-slate-300 hover:text-danger transition-colors p-1"
                   aria-label="מחק הכנסה"
                 >
@@ -357,11 +375,27 @@ function BankExpensesSection({
   monthLabel,
   onDelete,
 }: BankExpensesSectionProps) {
+  const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
+  const cancelDelete = useCallback(() => setPendingDelete(null), []);
   const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
   const total = sorted.reduce((s, tx) => s + tx.amount, 0);
 
+  function confirmDelete() {
+    if (pendingDelete) onDelete(pendingDelete.id);
+    setPendingDelete(null);
+  }
+
   return (
     <div className="mt-6">
+      {pendingDelete && (
+        <ConfirmDialog title="האם למחוק הוצאה זו?" confirmLabel="כן, מחק" onConfirm={confirmDelete} onCancel={cancelDelete}>
+          {pendingDelete.description || "הוצאה ללא תיאור"} ·{" "}
+          <span className="font-semibold text-rose-600 whitespace-nowrap" dir="ltr">
+            −{pendingDelete.amount.toLocaleString("he-IL")} ₪
+          </span>
+        </ConfirmDialog>
+      )}
+
       <div className="flex items-center justify-between mb-3 px-1">
         <h3 className="text-sm font-bold text-rose-700 dark:text-rose-400">
           הוצאות מהבנק — {monthLabel} ({sorted.length})
@@ -401,7 +435,7 @@ function BankExpensesSection({
                   −{tx.amount.toLocaleString("he-IL")} ₪
                 </span>
                 <button
-                  onClick={() => onDelete(tx.id)}
+                  onClick={() => setPendingDelete(tx)}
                   className="text-slate-300 hover:text-danger transition-colors p-1"
                   aria-label="מחק הוצאה מהבנק"
                 >
