@@ -3,9 +3,11 @@ import {
   doc,
   getDocs,
   writeBatch,
-  setDoc,
+  query,
+  where,
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
+import { descriptionKey, ruleMatches } from "../utils/descriptionKey";
 
 const COLLECTION = "learnedMappings";
 
@@ -20,9 +22,9 @@ function userCol(userId: string, colName: string = COLLECTION) {
   return collection(db, "users", userId, colName);
 }
 
-/** Sanitise a description into a safe Firestore document ID. */
-function toDocId(description: string): string {
-  return description
+/** Sanitise a string into a safe Firestore document ID. */
+function sanitizeId(text: string): string {
+  return text
     .trim()
     .toLowerCase()
     .replace(/[/\\.\s]+/g, "_")   // chars illegal in doc IDs → underscore
@@ -31,8 +33,19 @@ function toDocId(description: string): string {
 }
 
 /**
+ * Document ID for a description's mapping. Keyed by the normalised
+ * description so "משכורת 09/26" and "משכורת 10/26" share one rule; a
+ * description with no words left keeps its raw sanitised form.
+ */
+function toDocId(description: string): string {
+  return sanitizeId(descriptionKey(description)) || sanitizeId(description);
+}
+
+/**
  * Save (or update) a single learned mapping for a specific user.
- * Uses the sanitised description as the document ID → upsert semantics.
+ * Uses the normalised description as the document ID → upsert semantics.
+ * A rule saved under the older raw-description ID is removed so the two
+ * can't disagree.
  */
 export async function saveMapping(
   userId: string,
@@ -43,11 +56,45 @@ export async function saveMapping(
 ): Promise<void> {
   const id = toDocId(description);
   if (!id) return;
-  await setDoc(doc(db, "users", userId, colName, id), {
+  const batch = writeBatch(db);
+  batch.set(doc(db, "users", userId, colName, id), {
     description: description.trim(),
     category,
     subCategory,
   });
+  const legacyId = sanitizeId(description);
+  if (legacyId && legacyId !== id) batch.delete(doc(db, "users", userId, colName, legacyId));
+  await batch.commit();
+}
+
+/**
+ * Applies a just-learned rule to the user's existing rows that still have no
+ * category (any month), so earlier imports benefit too — not only future
+ * syncs. Rows that are already categorised are never touched. Returns how
+ * many rows were updated.
+ */
+export async function applyMappingToUncategorized(
+  userId: string,
+  txCollection: "transactions" | "incomeTransactions",
+  description: string,
+  category: string,
+  subCategory: string,
+  excludeId?: string,
+): Promise<number> {
+  if (!category) return 0;
+  const snapshot = await getDocs(
+    query(collection(db, "users", userId, txCollection), where("category", "==", "")),
+  );
+  const refs = snapshot.docs
+    .filter((d) => d.id !== excludeId && ruleMatches(description, String(d.data().description ?? "")))
+    .map((d) => d.ref);
+
+  for (let i = 0; i < refs.length; i += 500) {
+    const batch = writeBatch(db);
+    for (const ref of refs.slice(i, i + 500)) batch.update(ref, { category, subCategory });
+    await batch.commit();
+  }
+  return refs.length;
 }
 
 /**

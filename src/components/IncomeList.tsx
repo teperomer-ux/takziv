@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { Trash2, RefreshCw } from "lucide-react";
 import type { Transaction } from "../types";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
+import { useCategories } from "../hooks/useCategories";
 import BankSyncModal from "./BankSyncModal";
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -29,6 +30,9 @@ interface Props {
    *  collection alongside CC rows, so this handler is the same one
    *  TransactionList uses — not the income-collection delete. */
   onBankDelete: (id: string) => void;
+  /** Update a bank-side transaction — the expense handler, so categorising
+   *  one teaches the expense classifier just like a card row. */
+  onBankUpdate: (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
 }
 
 const ADD_NEW = "__add_new__";
@@ -42,6 +46,7 @@ export default function IncomeList({
   onDelete,
   onDeleteAll,
   onBankDelete,
+  onBankUpdate,
 }: Props) {
   const { categories, categoryNames, addCategory, addSubCategory } = useIncomeCategories();
 
@@ -348,6 +353,7 @@ export default function IncomeList({
           transactions={bankTransactions}
           monthLabel={monthLabel}
           onDelete={onBankDelete}
+          onUpdate={onBankUpdate}
         />
       )}
 
@@ -368,13 +374,18 @@ interface BankExpensesSectionProps {
   transactions: Transaction[];
   monthLabel: string;
   onDelete: (id: string) => void;
+  onUpdate: (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
 }
 
 function BankExpensesSection({
   transactions,
   monthLabel,
   onDelete,
+  onUpdate,
 }: BankExpensesSectionProps) {
+  // Bank debits are expenses, so they use the expense categories, not the income ones.
+  const { categories, categoryNames } = useCategories();
+  const expenseCategoryNames = categoryNames.filter((c) => c !== "מקורות הכנסה");
   const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
   const cancelDelete = useCallback(() => setPendingDelete(null), []);
   const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
@@ -426,10 +437,7 @@ function BankExpensesSection({
               </span>
             </div>
 
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
-                {tx.category || "ללא סעיף"}{tx.subCategory ? ` · ${tx.subCategory}` : ""}
-              </p>
+            <div className="flex items-center justify-end gap-2 mb-3">
               <div className="flex items-center gap-2 shrink-0">
                 <span className="font-bold text-sm text-rose-600 tabular-nums" dir="ltr">
                   −{tx.amount.toLocaleString("he-IL")} ₪
@@ -444,6 +452,42 @@ function BankExpensesSection({
                   </svg>
                 </button>
               </div>
+            </div>
+
+            {/* Category + sub-category — choosing one also teaches the classifier */}
+            <div className="flex gap-2">
+              <select
+                value={tx.category}
+                onChange={(e) => {
+                  onUpdate(tx.id, "category", e.target.value);
+                  onUpdate(tx.id, "subCategory", categories[e.target.value]?.[0] ?? "");
+                }}
+                aria-label="סעיף הוצאה"
+                className="flex-1 min-w-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm appearance-none"
+              >
+                <option value="">סעיף</option>
+                {/* Keep an auto-assigned category visible even if it isn't in the user's list. */}
+                {tx.category && !expenseCategoryNames.includes(tx.category) && (
+                  <option value={tx.category}>{tx.category}</option>
+                )}
+                {expenseCategoryNames.map((cat) => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+              <select
+                value={tx.subCategory}
+                onChange={(e) => onUpdate(tx.id, "subCategory", e.target.value)}
+                aria-label="תת סעיף הוצאה"
+                className="flex-1 min-w-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm appearance-none"
+              >
+                <option value="">תת סעיף</option>
+                {tx.subCategory && !(categories[tx.category] ?? []).includes(tx.subCategory) && (
+                  <option value={tx.subCategory}>{tx.subCategory}</option>
+                )}
+                {(categories[tx.category] ?? []).map((sub) => (
+                  <option key={sub} value={sub}>{sub}</option>
+                ))}
+              </select>
             </div>
           </div>
         ))}

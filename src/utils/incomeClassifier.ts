@@ -3,6 +3,8 @@
  * Separate from the expense classifier to avoid mapping conflicts.
  */
 
+import { findLearnedRule } from "./descriptionKey.js";
+
 export type MatchSource = "learned" | "system";
 
 export interface ClassificationResult {
@@ -66,16 +68,13 @@ export function suggestIncomeCategory(
   const lower = description.toLowerCase();
 
   // 1. Check user-learned mappings first
-  if (userMappings && userMappings.length > 0) {
-    for (const m of userMappings) {
-      if (lower.includes(m.description.toLowerCase())) {
-        return {
-          category: m.category,
-          subCategory: m.subCategory,
-          source: "learned",
-        };
-      }
-    }
+  const learned = findLearnedRule(description, userMappings);
+  if (learned) {
+    return {
+      category: learned.category,
+      subCategory: learned.subCategory,
+      source: "learned",
+    };
   }
 
   // 2. Fallback to hardcoded keyword rules

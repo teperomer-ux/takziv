@@ -18,6 +18,7 @@
     "scripts/**/*",
     "../src/utils/classifier.ts",
     "../src/utils/incomeClassifier.ts",
+    "../src/utils/descriptionKey.ts",
     "../src/utils/bankReconciliation.ts"
   ]
 }

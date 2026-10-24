@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { Settings, LogOut, Loader2, X } from "lucide-react";
 import BottomNav, { type Tab } from "./components/BottomNav";
 import Dashboard from "./components/Dashboard";
@@ -16,20 +16,37 @@ import { BankSyncContext, useBankSyncProvider } from "./hooks/useBankSync";
 import { institutionLabel } from "./constants/institutions";
 import { useAuth } from "./hooks/useAuth";
 import { getUidOrNull } from "./lib/firebase";
-import { saveMapping } from "./services/mappingService";
+import { saveMapping, applyMappingToUncategorized } from "./services/mappingService";
 import type { Transaction } from "./types";
 
 type UpdateFn = (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
 type CategoryPair = { category: string; subCategory: string };
 
+/** How long a row's category must stay unchanged before the rule is applied to older rows. */
+const BACKFILL_DELAY_MS = 1500;
+
 /**
  * Wraps a list's update handler so that categorising a row also teaches the
  * classifier (users/{uid}/{colName}); the bank sync applies these mappings to
- * future imports. Lists set category and subCategory in back-to-back calls,
- * so the latest pair per row is tracked locally instead of read from props.
+ * future imports, and existing uncategorised rows in txCollection with the
+ * same description get the category too. Lists set category and subCategory
+ * in back-to-back calls, so the latest pair per row is tracked locally
+ * instead of read from props, and the backfill waits for the pair to settle.
  */
-function useCategoryLearning(update: UpdateFn, rows: Transaction[], colName: string): UpdateFn {
+function useCategoryLearning(
+  update: UpdateFn,
+  rows: Transaction[],
+  colName: string,
+  txCollection: "transactions" | "incomeTransactions",
+): UpdateFn {
   const latest = useRef(new Map<string, CategoryPair>());
+  const backfillTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  useEffect(() => {
+    const timers = backfillTimers.current;
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
   return useCallback<UpdateFn>(
     (id, field, value) => {
       update(id, field, value);
@@ -47,8 +64,22 @@ function useCategoryLearning(update: UpdateFn, rows: Transaction[], colName: str
       saveMapping(uid, tx.description, next.category, next.subCategory, colName).catch((err) =>
         console.warn("[App] failed to learn category mapping:", err),
       );
+
+      clearTimeout(backfillTimers.current.get(id));
+      backfillTimers.current.set(
+        id,
+        setTimeout(() => {
+          backfillTimers.current.delete(id);
+          const settled = latest.current.get(id) ?? next;
+          applyMappingToUncategorized(uid, txCollection, tx.description, settled.category, settled.subCategory, id)
+            .then((count) => {
+              if (count) console.info(`[App] auto-categorised ${count} earlier rows like "${tx.description}"`);
+            })
+            .catch((err) => console.warn("[App] failed to apply mapping to earlier rows:", err));
+        }, BACKFILL_DELAY_MS),
+      );
     },
-    [update, rows, colName],
+    [update, rows, colName, txCollection],
   );
 }
 
@@ -112,8 +143,13 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
     [transactions],
   );
 
-  const updateExpense = useCategoryLearning(update, transactions, "learnedMappings");
-  const updateIncome = useCategoryLearning(incomeTx.update, incomeTx.transactions, "learnedIncomeMappings");
+  const updateExpense = useCategoryLearning(update, transactions, "learnedMappings", "transactions");
+  const updateIncome = useCategoryLearning(
+    incomeTx.update,
+    incomeTx.transactions,
+    "learnedIncomeMappings",
+    "incomeTransactions",
+  );
 
   const categoriesCtx = useCategoriesProvider();
   const incomeCategoriesCtx = useIncomeCategoriesProvider();
@@ -281,6 +317,7 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
                 transactions={incomeTx.transactions}
                 bankTransactions={bankTransactions}
                 onBankDelete={remove}
+                onBankUpdate={updateExpense}
                 year={year}
                 month={month}
                 onUpdate={updateIncome}
