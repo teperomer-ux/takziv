@@ -28,7 +28,7 @@ const SUGGESTIONS = [
 
 const AI_ERROR_MESSAGES: Record<string, string> = {
   AI_NOT_CONFIGURED: "העוזר עדיין לא הוגדר בשרת — חסר מפתח API (ANTHROPIC_API_KEY או GEMINI_API_KEY).",
-  AI_RATE_LIMITED: "נשאלו הרבה שאלות בזמן קצר. נסו שוב בעוד כמה דקות.",
+  AI_RATE_LIMITED: "נשאלו הרבה שאלות בזמן קצר (או שנוצלה מכסת ה-AI). נסו שוב בעוד דקה.",
   AI_ERROR: "שירות ה-AI לא הגיב כרגע. נסו שוב בעוד רגע.",
 };
 

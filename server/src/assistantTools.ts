@@ -201,13 +201,9 @@ function run(name: ToolName, args: never, data: UserFinanceData): ToolOutcome {
       const byCategory = categoryTotals(matched);
       return {
         result: { range: describeRange(a), kind: a.kind, totals: totals(matched), categories: byCategory },
-        cards: byCategory.slice(0, 3).map((c) => ({
-          type: "total",
-          kind: a.kind,
-          label: c.category || "ללא קטגוריה",
-          amount: c.total,
-          detail: `${describeRange(a)} · ${c.count} תנועות`,
-        })),
+        // No cards: the model often calls this to explore, so its top categories
+        // needn't be what the answer is about. The answer text carries the figures.
+        cards: [],
       };
     }
 

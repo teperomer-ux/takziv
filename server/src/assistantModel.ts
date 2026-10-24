@@ -29,7 +29,7 @@ export class AssistantNotConfiguredError extends Error {}
 
 const DEFAULT_MODELS: Record<Provider, string> = {
   anthropic: "claude-opus-5-5",
-  gemini: "gemini-2.5-flash",
+  gemini: "gemini-3.5-flash",
 };
 /** Tool-calling rounds before the model must answer with what it has. */
 const MAX_ROUNDS = 6;
@@ -139,6 +139,15 @@ interface GeminiContent {
   parts: GeminiPart[];
 }
 
+/** Gemini often answers 503 (overloaded) or 429 for a moment; retry those twice with a short backoff. */
+async function fetchWithRetry(url: string, init: RequestInit, retries = 2): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (attempt >= retries || (res.status !== 503 && res.status !== 429)) return res;
+    await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+  }
+}
+
 async function askGemini(messages: ChatMessage[], data: UserFinanceData, system: string, model: string): Promise<AssistantReply> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const contents: GeminiContent[] = messages.map((m) => ({
@@ -154,7 +163,7 @@ async function askGemini(messages: ChatMessage[], data: UserFinanceData, system:
 
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const last = round === MAX_ROUNDS - 1;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY ?? "" },
       body: JSON.stringify({
@@ -164,9 +173,8 @@ async function askGemini(messages: ChatMessage[], data: UserFinanceData, system:
         toolConfig: { functionCallingConfig: { mode: last ? "NONE" : "AUTO" } },
         generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
       }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(`Gemini HTTP ${res.status}`), { status: res.status });
     const body = (await res.json()) as { candidates?: { content?: GeminiContent }[] };
     const content = body.candidates?.[0]?.content;
     const parts = content?.parts ?? [];

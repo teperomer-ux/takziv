@@ -53,7 +53,9 @@ aiRouter.post("/api/ai/query", requireGoogleUser, async (req, res) => {
       log("not_configured");
       return sendError(res, "AI_NOT_CONFIGURED");
     }
-    log("error", { name: (err as Error)?.name, status: (err as { status?: number })?.status });
-    sendError(res, "AI_ERROR");
+    const status = (err as { status?: number })?.status;
+    log("error", { name: (err as Error)?.name, status });
+    // The provider's own quota (e.g. Gemini free tier: a few requests a minute).
+    sendError(res, status === 429 ? "AI_RATE_LIMITED" : "AI_ERROR");
   }
 });
