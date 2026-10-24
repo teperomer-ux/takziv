@@ -53,6 +53,8 @@ export interface MapResult {
   skippedPending: number;
   /** Bank debits that are the monthly lump-sum credit-card bill. */
   skippedCardPayments: number;
+  /** Rows with no amount (or 0): nothing to record in either direction. */
+  skippedZeroAmount: number;
 }
 
 const israelDate = new Intl.DateTimeFormat("en-CA", {
@@ -91,7 +93,7 @@ export function mapScrapedTransactions(
   const source = SOURCE_BY_COMPANY[companyId];
   const isBank = source === "bank";
   const seen = new Map<string, number>();
-  const result: MapResult = { expenses: [], incomes: [], skippedPending: 0, skippedCardPayments: 0 };
+  const result: MapResult = { expenses: [], incomes: [], skippedPending: 0, skippedCardPayments: 0, skippedZeroAmount: 0 };
 
   for (const account of accounts) {
     for (const txn of account.txns) {
@@ -101,7 +103,14 @@ export function mapScrapedTransactions(
       }
 
       const description = txn.description.trim();
-      const isIncome = isBank && txn.chargedAmount > 0;
+      // The sign is the direction: debits are negative, credits positive.
+      // Some scrapers leave chargedAmount empty and only fill originalAmount.
+      const charged = Number.isFinite(txn.chargedAmount) ? txn.chargedAmount : txn.originalAmount;
+      if (!Number.isFinite(charged) || charged === 0) {
+        result.skippedZeroAmount++;
+        continue;
+      }
+      const isIncome = isBank && charged > 0;
       if (isBank && !isIncome && matchCreditCardCompany(description)) {
         result.skippedCardPayments++;
         continue;
@@ -117,7 +126,7 @@ export function mapScrapedTransactions(
         account.accountNumber,
         txn.identifier ?? "",
         date,
-        txn.chargedAmount,
+        charged,
         description,
         txn.installments ? `${txn.installments.number}/${txn.installments.total}` : "",
       ].join("|");
@@ -133,7 +142,7 @@ export function mapScrapedTransactions(
           id,
           date,
           description,
-          amount: txn.chargedAmount,
+          amount: charged,
           category: match?.category ?? "",
           subCategory: match?.subCategory ?? "",
           billingMonth,
@@ -143,7 +152,7 @@ export function mapScrapedTransactions(
       }
 
       // Scrapers report charges as negative; the app stores them positive.
-      const amount = -txn.chargedAmount;
+      const amount = -charged;
       const match = suggestCategory(description, mappings.expense);
       const isCredit = amount < 0;
       result.expenses.push({

@@ -10,6 +10,7 @@
     "dev": "tsc && node --env-file-if-exists=.env build/server/src/index.js",
     "sync:job": "tsc && node --env-file-if-exists=.env build/server/src/syncJob.js",
     "deploy:sync-job": "bash infra/deploy-sync-job.sh",
+    "dedupe:tx": "tsc && node --env-file-if-exists=.env build/server/scripts/dedupe-transactions.js",
     "scrape:test": "tsc && node --env-file-if-exists=.env build/server/scripts/test-scrape.js",
     "test": "tsc && node --test \"build/server/test/**/*.test.js\""
   },

@@ -64,3 +64,31 @@ test("each supported provider tags expenses with the app's source slug", () => {
     assert.equal(tx.source, source, company);
   }
 });
+
+test("bank debits are expenses and credits are incomes, never the other way round", () => {
+  const bank = account([
+    { description: "הע. לשרה אבבה בסניף 12-668", chargedAmount: -4300, originalAmount: -4300 },
+    { description: "משכורת", chargedAmount: 12000, originalAmount: 12000 },
+  ]);
+  const { expenses, incomes } = mapScrapedTransactions(CompanyTypes.discount, [bank], noMappings);
+  assert.deepEqual(expenses.map((t) => [t.description, t.amount]), [["הע. לשרה אבבה בסניף 12-668", 4300]]);
+  assert.deepEqual(incomes.map((t) => [t.description, t.amount]), [["משכורת", 12000]]);
+});
+
+test("the direction falls back to originalAmount when chargedAmount is missing; zero rows are skipped", () => {
+  const bank = account([
+    { chargedAmount: undefined as unknown as number, originalAmount: -4300 },
+    { chargedAmount: 0, originalAmount: 0 },
+  ]);
+  const result = mapScrapedTransactions(CompanyTypes.discount, [bank], noMappings);
+  assert.deepEqual(result.expenses.map((t) => t.amount), [4300]);
+  assert.equal(result.incomes.length, 0);
+  assert.equal(result.skippedZeroAmount, 1);
+});
+
+test("syncing the same bank statement twice maps to the same ids", () => {
+  const statement = () => [account([{ description: "הע. לשרה אבבה בסניף 12-668", chargedAmount: -4300 }, {}])];
+  const first = mapScrapedTransactions(CompanyTypes.discount, statement(), noMappings).expenses.map((t) => t.id);
+  const second = mapScrapedTransactions(CompanyTypes.discount, statement(), noMappings).expenses.map((t) => t.id);
+  assert.deepEqual(first, second);
+});

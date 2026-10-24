@@ -29,14 +29,6 @@ function userDoc(docId: string) {
 
 // ─── Converters ─────────────────────────────────────────────────────────────
 
-/** Derive billingMonth/billingYear from the date if not explicitly set. */
-function deriveBilling(tx: { date: string; billingMonth?: number; billingYear?: number }) {
-  if (tx.billingMonth && tx.billingYear) return { billingMonth: tx.billingMonth, billingYear: tx.billingYear };
-  // Fallback: parse from date string "YYYY-MM-DD"
-  const [y, m] = tx.date.split("-").map(Number);
-  return { billingMonth: m || 1, billingYear: y || new Date().getFullYear() };
-}
-
 /** Accept only the four canonical source slugs; anything else (incl. the
  *  legacy "credit-card" string written before provider-level tagging) maps to
  *  undefined so the rest of the app treats those rows as untagged CC. */
@@ -74,46 +66,7 @@ function docToTransaction(
   };
 }
 
-function toFirestoreData(tx: Omit<Transaction, "id">) {
-  const parsed = new Date(tx.date);
-  // Guard against Invalid Date — fall back to today rather than crashing the batch
-  const safeDate = isNaN(parsed.getTime()) ? new Date() : parsed;
-  const billing = deriveBilling(tx);
-  const source = normalizeSource(tx.source);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const out: Record<string, any> = {
-    date: Timestamp.fromDate(safeDate),
-    description: tx.description,
-    amount: tx.amount,
-    category: tx.category ?? "",
-    subCategory: tx.subCategory ?? "",
-    status: tx.status,
-    billingMonth: billing.billingMonth,
-    billingYear: billing.billingYear,
-  };
-  // Only write source when the caller actually tagged the row. Firestore
-  // rejects `undefined`, so we omit the field for legacy/untyped writes.
-  if (source) out.source = source;
-  return out;
-}
-
 // ─── Write operations ───────────────────────────────────────────────────────
-
-/** Bulk-save transactions in atomic batch writes (auto-chunks at 500). */
-export async function bulkSaveTransactions(
-  txs: Omit<Transaction, "id">[]
-): Promise<void> {
-  const colRef = userCol();
-  for (let i = 0; i < txs.length; i += 500) {
-    const chunk = txs.slice(i, i + 500);
-    const batch = writeBatch(db);
-    for (const tx of chunk) {
-      const ref = doc(colRef);
-      batch.set(ref, toFirestoreData(tx));
-    }
-    await batch.commit();
-  }
-}
 
 /** Update specific fields on an existing transaction. */
 export async function updateTransaction(

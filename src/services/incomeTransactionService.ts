@@ -47,33 +47,7 @@ function docToTransaction(
   };
 }
 
-function toFirestoreData(tx: Omit<Transaction, "id">) {
-  return {
-    date: Timestamp.fromDate(new Date(tx.date)),
-    description: tx.description,
-    amount: tx.amount,
-    category: tx.category,
-    subCategory: tx.subCategory,
-    status: tx.status,
-  };
-}
-
 // ─── Write operations ───────────────────────────────────────────────────────
-
-export async function bulkSaveIncomeTransactions(
-  txs: Omit<Transaction, "id">[]
-): Promise<void> {
-  const colRef = userCol();
-  for (let i = 0; i < txs.length; i += 500) {
-    const chunk = txs.slice(i, i + 500);
-    const batch = writeBatch(db);
-    for (const tx of chunk) {
-      const ref = doc(colRef);
-      batch.set(ref, toFirestoreData(tx));
-    }
-    await batch.commit();
-  }
-}
 
 export async function updateIncomeTransaction(
   id: string,

@@ -153,7 +153,7 @@ export default function IncomeList({
       {/* Month header */}
       <div className="flex items-center justify-between mb-4 px-1">
         <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">
-          הכנסות — {monthLabel} ({transactions.length})
+          עובר ושב — {monthLabel}
         </h2>
 
         <div className="flex items-center gap-1">
@@ -220,6 +220,13 @@ export default function IncomeList({
           )}
         </div>
       )}
+
+      {/* Credits and debits are listed separately: incomes here, bank expenses below */}
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-400">
+          הכנסות ({transactions.length})
+        </h3>
+      </div>
 
       <div className="space-y-3">
         {transactions.map((tx) => {
