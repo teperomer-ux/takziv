@@ -13,6 +13,7 @@
 # takziv-api account this service depends on.
 #
 #   bash infra/deploy-api.sh                                  # from server/
+#   NETLIFY_ORIGIN=https://<site>.netlify.app bash infra/deploy-api.sh   # also allow the Netlify frontend
 #   GEMINI_API_KEY=… bash infra/deploy-api.sh                 # also store/rotate the AI key
 #   AI_KEY_ENV=ANTHROPIC_API_KEY ANTHROPIC_API_KEY=… bash infra/deploy-api.sh
 #   IMAGE=me-west1-docker.pkg.dev/…:tag bash infra/deploy-api.sh   # reuse an image
@@ -30,8 +31,14 @@ KEYRING="${KEYRING:-takziv}"
 KEY="${KEY:-bank-credentials}"
 AR_REPO="${AR_REPO:-takziv}"
 SERVICE="${SERVICE:-takziv-api}"
-# The app's Firebase Hosting origins; comma-separated.
-ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com}"
+# Browser origins allowed to call the API (CORS); comma-separated. Defaults to
+# the Firebase Hosting origins plus the Netlify site, if NETLIFY_ORIGIN is set
+# (e.g. https://takziv.netlify.app). Set ALLOWED_ORIGINS to replace the list.
+NETLIFY_ORIGIN="${NETLIFY_ORIGIN:-}"
+NETLIFY_ORIGIN="${NETLIFY_ORIGIN%/}"  # CORS matches exactly; "https://x.netlify.app/" would never match
+[[ -z "$NETLIFY_ORIGIN" || "$NETLIFY_ORIGIN" == https://* ]] ||
+  { echo "✖ NETLIFY_ORIGIN must start with https:// (got $NETLIFY_ORIGIN)" >&2; exit 1; }
+ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com${NETLIFY_ORIGIN:+,$NETLIFY_ORIGIN}}"
 # One request can hold a Chromium instance (~300-500MB RAM) for up to the
 # 120s scrape timeout; MEMORY / CPU / MAX_CONCURRENT_SCRAPES are sized together.
 MEMORY="${MEMORY:-2Gi}"
@@ -168,8 +175,10 @@ echo "  Service:  $SERVICE ($REGION), image $IMAGE"
 echo "  URL:      $URL"
 echo "  CORS:     $ALLOWED_ORIGINS"
 echo
-echo "Point the frontend at it (repo root), then deploy Hosting:"
-echo "  echo 'VITE_API_BASE_URL=$URL' >> .env.production"
-echo "  npm run build && firebase deploy --only hosting"
+[[ -n "$NETLIFY_ORIGIN" || "$ALLOWED_ORIGINS" == *netlify* ]] ||
+  echo "  ! No Netlify origin in CORS: re-run with NETLIFY_ORIGIN=https://<site>.netlify.app"
+echo "Point the frontend at it, then redeploy:"
+echo "  Netlify:  Site settings → Environment variables → VITE_API_BASE_URL=$URL, then trigger a deploy"
+echo "  Firebase: echo 'VITE_API_BASE_URL=$URL' >> .env.production && npm run build && firebase deploy --only hosting"
 echo "Logs:"
 echo "  gcloud logging read 'resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"$SERVICE\"' --limit 50"
