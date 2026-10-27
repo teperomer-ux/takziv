@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Sparkles, Send, X, Eraser, RotateCcw } from "lucide-react";
-import { askAssistant, type AssistantCard, type ChatMessage } from "../services/aiAssistantService";
-import { BankSyncError } from "../services/bankSyncService";
+import { AssistantError, askAssistant, type AssistantCard, type AssistantErrorCode, type ChatMessage } from "../services/aiAssistantService";
 import { ERROR_MESSAGES } from "../constants/bankSyncMessages";
 import { formatDate } from "../utils/formatDate";
 
 // ─── AI financial assistant ──────────────────────────────────────────────────
 // A floating button that opens a chat about the user's own data. Answers come
-// from the server (POST /api/ai/query), which lets the model read the user's
-// transactions only — no web — and returns cards with the exact figures.
+// from Gemini, called from the browser (services/aiAssistantService.ts), which
+// lets the model read the user's transactions only — no web — and returns
+// cards with the exact figures.
 
 interface Entry {
   id: number;
@@ -26,16 +26,14 @@ const SUGGESTIONS = [
   { label: "כמה הוצאתי על מזון?", prompt: "כמה סך הכל הוצאתי על מזון החודש?" },
 ];
 
-const AI_ERROR_MESSAGES: Record<string, string> = {
-  AI_NOT_CONFIGURED: "העוזר עדיין לא הוגדר בשרת — חסר מפתח API (ANTHROPIC_API_KEY או GEMINI_API_KEY).",
+const AI_ERROR_MESSAGES: Record<AssistantErrorCode, string> = {
+  AI_NOT_CONFIGURED: "העוזר עדיין לא הוגדר — חסר מפתח VITE_GEMINI_API_KEY בהגדרות האתר.",
   AI_RATE_LIMITED: "נשאלו הרבה שאלות בזמן קצר (או שנוצלה מכסת ה-AI). נסו שוב בעוד דקה.",
   AI_ERROR: "שירות ה-AI לא הגיב כרגע. נסו שוב בעוד רגע.",
 };
 
 function errorMessage(err: unknown) {
-  if (err instanceof BankSyncError) {
-    return AI_ERROR_MESSAGES[err.code] ?? ERROR_MESSAGES[err.code] ?? ERROR_MESSAGES.INTERNAL_ERROR;
-  }
+  if (err instanceof AssistantError) return AI_ERROR_MESSAGES[err.code];
   return ERROR_MESSAGES.INTERNAL_ERROR;
 }
 
