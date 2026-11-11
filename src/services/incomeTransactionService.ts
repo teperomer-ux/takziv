@@ -12,6 +12,7 @@ import {
 } from "firebase/firestore";
 import { db, getUid, getUidOrNull } from "../lib/firebase";
 import type { Transaction } from "../types";
+import { israelYmd } from "../utils/formatDate";
 import { deleteAndDismiss } from "./dismissedTransactionService";
 
 const COLLECTION = "incomeTransactions";
@@ -32,7 +33,7 @@ function docToTransaction(
   data: Record<string, unknown>
 ): Transaction {
   const ts = data.date as Timestamp;
-  const dateStr = ts?.toDate?.().toISOString().split("T")[0] ?? new Date().toISOString().split("T")[0];
+  const dateStr = israelYmd(ts?.toDate?.() ?? new Date());
   const [fallbackY, fallbackM] = dateStr.split("-").map(Number);
   return {
     id,

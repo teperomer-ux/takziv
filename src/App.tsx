@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useEffect } from "react";
+import { useState, useMemo, useRef, useCallback, useEffect, lazy, Suspense } from "react";
 import { Settings, LogOut, Loader2, X } from "lucide-react";
 import BottomNav, { type Tab } from "./components/BottomNav";
 import Dashboard from "./components/Dashboard";
@@ -6,7 +6,6 @@ import TransactionList from "./components/TransactionList";
 import IncomeList from "./components/IncomeList";
 import SettingsModal from "./components/SettingsModal";
 import BankSyncModal from "./components/BankSyncModal";
-import AIAssistantModal from "./components/AIAssistantModal";
 import Login from "./components/Login";
 import { useTransactions } from "./hooks/useTransactions";
 import { useIncomeTransactions } from "./hooks/useIncomeTransactions";
@@ -20,7 +19,11 @@ import { getUidOrNull } from "./lib/firebase";
 import { saveMapping, applyMappingToUncategorized } from "./services/mappingService";
 import type { Transaction } from "./types";
 
-type UpdateFn = (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
+// The assistant (chat UI, Gemini client, query tools) loads in its own chunk;
+// its floating button appears once that chunk is in.
+const AIAssistantModal = lazy(() => import("./components/AIAssistantModal"));
+
+type UpdateFn =(id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
 type CategoryPair = { category: string; subCategory: string };
 
 /** How long a row's category must stay unchanged before the rule is applied to older rows. */
@@ -334,7 +337,9 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
       <BottomNav active={tab} onChange={(t) => { setTab(t); if (t !== "expenses") setFilterUncategorized(false); }} />
 
       {/* ── AI assistant (floating button + chat) ───────────── */}
-      <AIAssistantModal />
+      <Suspense fallback={null}>
+        <AIAssistantModal />
+      </Suspense>
 
       {/* ── Settings Modal ────────────────────────────────────── */}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />

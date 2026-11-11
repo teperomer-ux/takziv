@@ -13,6 +13,7 @@ import {
 import { db, getUid, getUidOrNull } from "../lib/firebase";
 import type { Transaction } from "../types";
 import { deleteAndDismiss } from "./dismissedTransactionService";
+import { israelYmd } from "../utils/formatDate";
 
 const COLLECTION = "transactions";
 const NOOP = () => {};
@@ -50,7 +51,7 @@ function docToTransaction(
   data: Record<string, unknown>
 ): Transaction {
   const ts = data.date as Timestamp;
-  const dateStr = ts?.toDate?.().toISOString().split("T")[0] ?? new Date().toISOString().split("T")[0];
+  const dateStr = israelYmd(ts?.toDate?.() ?? new Date());
   const [fallbackY, fallbackM] = dateStr.split("-").map(Number);
   return {
     id,
@@ -89,77 +90,103 @@ export async function deleteTransaction(id: string): Promise<void> {
 }
 
 /**
- * Delete all transactions for a given billing month (batch).
- *
- * Strategy: fetch EVERY doc, convert with docToTransaction (which applies the
- * billingMonth/billingYear fallback for legacy docs missing those fields),
- * then delete the ones that match.  This guarantees we catch documents whose
- * billingMonth was never written to Firestore but is derived from the date.
+ * Delete all transactions for a given billing month (batch). Queries the
+ * month directly — the same filter the month view's listener uses, so it
+ * deletes exactly the rows the user sees — and reads only those docs.
  */
 export async function deleteMonthTransactions(
   year: number,
   month: number,
 ): Promise<number> {
-  console.log(`🔥 DELETE START: billingMonth=${month}, billingYear=${year}`);
+  const snapshot = await getDocs(
+    query(userCol(), where("billingYear", "==", year), where("billingMonth", "==", month)),
+  );
+  if (snapshot.empty) return 0;
 
-  const colRef = userCol();
-
-  // 1. Fetch every document in the collection
-  const allSnapshot = await getDocs(query(colRef, orderBy("date", "desc")));
-
-  if (allSnapshot.empty) {
-    console.log("🔥 DELETE: collection is empty, nothing to delete");
-    return 0;
-  }
-
-  // 2. Convert to Transaction objects (applies billingMonth fallback)
-  //    and collect refs whose billingMonth/billingYear match
-  const refsToDelete: ReturnType<typeof doc>[] = [];
-
-  for (const d of allSnapshot.docs) {
-    const tx = docToTransaction(d.id, d.data());
-    if (tx.billingMonth === month && tx.billingYear === year) {
-      refsToDelete.push(d.ref);
-    }
-  }
-
-  console.log(`🔥 DELETE: found ${refsToDelete.length} docs matching ${year}-${String(month).padStart(2, "0")} out of ${allSnapshot.size} total`);
-
-  if (refsToDelete.length === 0) return 0;
-
-  // 3. Batch-delete in chunks of 500
-  for (let i = 0; i < refsToDelete.length; i += 500) {
-    const chunk = refsToDelete.slice(i, i + 500);
+  for (let i = 0; i < snapshot.docs.length; i += 500) {
     const batch = writeBatch(db);
-    for (const ref of chunk) batch.delete(ref);
+    for (const d of snapshot.docs.slice(i, i + 500)) batch.delete(d.ref);
     await batch.commit();
   }
-
-  console.log(`🔥 FIRESTORE DELETED: ${refsToDelete.length} documents for ${month}/${year}`);
-
-  // 4. Verify: re-fetch and confirm the bucket is empty
-  const verifySnapshot = await getDocs(query(colRef, orderBy("date", "desc")));
-  const remaining = verifySnapshot.docs
-    .map((d) => docToTransaction(d.id, d.data()))
-    .filter((tx) => tx.billingMonth === month && tx.billingYear === year);
-
-  if (remaining.length > 0) {
-    console.error(`🔥 VERIFY FAILED: ${remaining.length} docs STILL match ${month}/${year} after deletion!`);
-  } else {
-    console.log(`🔥 VERIFY OK: 0 docs remain for ${month}/${year}`);
-  }
-
-  return refsToDelete.length;
+  return snapshot.docs.length;
 }
 
 // ─── Read operations ────────────────────────────────────────────────────────
 
-/** Fetch every transaction in the collection (one-shot). */
-export async function getAllTransactions(): Promise<Transaction[]> {
-  if (!getUidOrNull()) return [];
-  const q = query(userCol(), orderBy("date", "desc"));
-  const snapshot = await getDocs(q);
-  return snapshot.docs.map((d) => docToTransaction(d.id, d.data()));
+// ─── Session history cache ──────────────────────────────────────────────────
+//
+// The dashboard's averages, trend and recurring-bill views need every month,
+// but reading the whole collection costs one Firestore read per row. It is
+// read once per session and kept here (surviving tab switches); the month on
+// screen is kept current from its live listener via mergeMonthIntoHistory, so
+// edits and deletes cost no extra reads. The full read is repeated only after
+// a bank sync, which can add rows to any month.
+
+interface History {
+  uid: string;
+  /** Date.now() when the read started; a sync finishing after it makes the cache stale. */
+  fetchedAt: number;
+  rows: Map<string, Transaction>;
+  /**
+   * Rows stored without billingYear/billingMonth. The month listener can't
+   * see them (it filters on those fields), so a month merge must not treat
+   * their absence from it as a delete.
+   */
+  legacyIds: Set<string>;
+}
+
+let history: { uid: string; fetchedAt: number; promise: Promise<History> } | null = null;
+let loaded: History | null = null;
+
+/**
+ * Every transaction of the signed-in user, from the session cache when it is
+ * newer than `importedAt` (ms of the latest bank sync), otherwise from one
+ * full read.
+ */
+export async function loadTransactionHistory(importedAt = 0): Promise<Transaction[]> {
+  const uid = getUidOrNull();
+  if (!uid) return [];
+  if (!history || history.uid !== uid || importedAt > history.fetchedAt) {
+    const fetchedAt = Date.now();
+    const promise = getDocs(query(userCol(), orderBy("date", "desc"))).then((snapshot) => {
+      const h: History = { uid, fetchedAt, rows: new Map(), legacyIds: new Set() };
+      for (const d of snapshot.docs) {
+        const data = d.data();
+        h.rows.set(d.id, docToTransaction(d.id, data));
+        if (data.billingYear == null || data.billingMonth == null) h.legacyIds.add(d.id);
+      }
+      if (history?.promise === promise) loaded = h;
+      return h;
+    });
+    history = { uid, fetchedAt, promise };
+    promise.catch(() => {
+      if (history?.promise === promise) history = null;
+    });
+  }
+  return [...(await history.promise).rows.values()];
+}
+
+/**
+ * Replaces one billing month of the cached history with the rows its live
+ * listener reported (`live` must be that month's complete result), and
+ * returns the updated history; null while it hasn't loaded. Idempotent.
+ */
+export function mergeMonthIntoHistory(year: number, month: number, live: readonly Transaction[]): Transaction[] | null {
+  const h = loaded;
+  if (!h || h.uid !== getUidOrNull()) return null;
+  const liveIds = new Set<string>();
+  for (const tx of live) {
+    if (tx.billingYear !== year || tx.billingMonth !== month) continue;
+    liveIds.add(tx.id);
+    h.rows.set(tx.id, tx);
+    h.legacyIds.delete(tx.id);
+  }
+  for (const [id, tx] of h.rows) {
+    if (tx.billingYear === year && tx.billingMonth === month && !liveIds.has(id) && !h.legacyIds.has(id)) {
+      h.rows.delete(id);
+    }
+  }
+  return [...h.rows.values()];
 }
 
 // ─── Real-time listener ─────────────────────────────────────────────────────

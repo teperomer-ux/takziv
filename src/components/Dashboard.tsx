@@ -1,6 +1,6 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import type { Transaction } from "../types";
-import { getAllTransactions } from "../services/transactionService";
+import { loadTransactionHistory, mergeMonthIntoHistory } from "../services/transactionService";
 import { onIncomeTransactionsSnapshot } from "../services/incomeTransactionService";
 import { calculateRecurringAndAlerts } from "../utils/recurringBills";
 import { matchCreditCardCompany } from "../utils/bankReconciliation";
@@ -13,14 +13,22 @@ import { getFinancialProfile } from "../services/userProfileService";
 import { DEFAULT_FINANCIAL_PROFILE, type UserFinancialProfile } from "../types/userProfile";
 import BottomLine from "./BottomLine";
 import SmartInsights from "./SmartInsights";
-import MonthlyTrend from "./MonthlyTrend";
-import CategoryBreakdown from "./CategoryBreakdown";
 import SmartSaverOnboarding from "./SmartSaverOnboarding";
 import SavingsInsightsList from "./SavingsInsightsList";
 import BankSyncModal from "./BankSyncModal";
 import { useCategories } from "../hooks/useCategories";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
+import { useBankSync } from "../hooks/useBankSync";
 import { isExcludedFromTotals, splitTotals } from "../utils/internalTransfers";
+
+// Recharts is most of the bundle; the charts load in their own chunk.
+const MonthlyTrend = lazy(() => import("./MonthlyTrend"));
+const CategoryBreakdown = lazy(() => import("./CategoryBreakdown"));
+
+/** Holds the chart's place while its chunk loads, so the page doesn't jump. */
+function ChartFallback() {
+  return <div className="h-56 animate-pulse rounded-xl bg-slate-100 dark:bg-slate-800" aria-hidden="true" />;
+}
 
 interface Props {
   transactions: Transaction[];
@@ -137,7 +145,8 @@ function computeAverages(allTxs: Transaction[], excludedCategories: ReadonlySet<
 export default function Dashboard({ transactions, year, month, onShowUncategorized }: Props) {
   const { excludedCategories: excludedExpenseCategories } = useCategories();
   const { excludedCategories: excludedIncomeCategories } = useIncomeCategories();
-  const [allTxs, setAllTxs] = useState<Transaction[]>([]);
+  const { connections } = useBankSync();
+  const [history, setHistory] = useState<Transaction[]>([]);
   const [loadingAvg, setLoadingAvg] = useState(true);
   const [additionalExpenses, setAdditionalExpenses] = useState<AdditionalExpense[]>([]);
   const [incomeTransactions, setIncomeTransactions] = useState<Transaction[]>([]);
@@ -163,25 +172,34 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
     }).catch(() => {});
   }, []);
 
+  // Full history for averages / trend / recurring bills: read once per session
+  // (see loadTransactionHistory), again only after a bank sync finishes.
+  const lastImportAt = useMemo(
+    () => Math.max(0, ...connections.map((c) => (c.lastSyncAt ? Date.parse(c.lastSyncAt) : 0))),
+    [connections],
+  );
   useEffect(() => {
-    getAllTransactions()
+    let active = true;
+    loadTransactionHistory(lastImportAt)
       .then((txs) => {
-        setAllTxs(txs);
-
-        // Debug: confirm what billing-month buckets exist after every refresh
-        const buckets = new Map<string, number>();
-        for (const tx of txs) {
-          const key = `${tx.billingYear}-${String(tx.billingMonth).padStart(2, "0")}`;
-          buckets.set(key, (buckets.get(key) ?? 0) + 1);
-        }
-        console.log("🚨 ALL-TXS REFRESHED 🚨", {
-          totalTransactions: txs.length,
-          buckets: Object.fromEntries([...buckets.entries()].sort()),
-        });
+        if (active) setHistory(txs);
       })
       .catch((err) => console.warn("[Dashboard] failed to load averages:", err))
-      .finally(() => setLoadingAvg(false));
-  }, [transactions]);
+      .finally(() => {
+        if (active) setLoadingAvg(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [lastImportAt]);
+
+  // The month on screen comes from its live listener, so edits, deletes and
+  // new rows show up in the averages without re-reading the history.
+  // (mergeMonthIntoHistory updates the session cache; it's idempotent.)
+  const allTxs = useMemo(
+    () => mergeMonthIntoHistory(year, month, transactions) ?? history,
+    [history, year, month, transactions],
+  );
 
   // Subscribe to income transactions for current month
   useEffect(() => {
@@ -283,16 +301,18 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
 
           {/* Chart content */}
           <div className="p-4">
-            {activeChart === "months" ? (
-              <MonthlyTrend
-                allTransactions={allTxs}
-                year={year}
-                month={month}
-                excludedCategories={excludedExpenseCategories}
-              />
-            ) : (
-              <CategoryBreakdown spending={spending} totalSpent={totalSpent} />
-            )}
+            <Suspense fallback={<ChartFallback />}>
+              {activeChart === "months" ? (
+                <MonthlyTrend
+                  allTransactions={allTxs}
+                  year={year}
+                  month={month}
+                  excludedCategories={excludedExpenseCategories}
+                />
+              ) : (
+                <CategoryBreakdown spending={spending} totalSpent={totalSpent} />
+              )}
+            </Suspense>
           </div>
         </div>
       )}

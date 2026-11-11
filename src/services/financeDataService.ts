@@ -7,6 +7,7 @@ import {
   withDefaultExclusion,
 } from "../utils/internalTransfers";
 import type { FinanceRow, RowKind } from "../utils/financeQueries";
+import { israelYmd } from "../utils/formatDate";
 
 /** The signed-in user's rows for the AI assistant (client port of server/src/financeData.ts). */
 export interface UserFinanceData {
@@ -28,7 +29,8 @@ function readCategories(docs: { id: string; data: DocumentData }[], excludeField
 
 /** Maps a stored doc to a FinanceRow, deriving the month the way the app's lists do. */
 function toFinanceRow(kind: RowKind, data: DocumentData, excluded: ReadonlySet<string>): FinanceRow {
-  const date = (data.date as Timestamp | undefined)?.toDate?.().toISOString().slice(0, 10) ?? "";
+  const ts = (data.date as Timestamp | undefined)?.toDate?.();
+  const date = ts ? israelYmd(ts) : "";
   const category = String(data.category ?? "");
   const billing =
     kind === "expense" && data.billingYear && data.billingMonth

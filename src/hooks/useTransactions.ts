@@ -81,6 +81,11 @@ export function useTransactions(): UseTransactionsReturn {
   }, [year, month]);
 
   const setMonth = useCallback((y: number, m: number) => {
+    // In the same render as the new month, so nothing ever sees the previous
+    // month's rows labelled with the new year/month (the dashboard merges
+    // them into its cached history by month).
+    setLoading(true);
+    setTransactions([]);
     setYear(y);
     setMonthNum(m);
   }, []);
