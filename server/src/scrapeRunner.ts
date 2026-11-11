@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import puppeteer, { type Page } from "puppeteer";
 import {
   createScraper,
@@ -7,11 +9,43 @@ import {
   type ScraperScrapingResult,
 } from "israeli-bank-scrapers";
 import { ApiError, type ApiErrorCode } from "./errors.js";
+import { exportBrowserSession, restoreBrowserSession, type BrowserSession } from "./browserSession.js";
+import { SCRAPE_TIMEOUT_MS } from "./syncSupport.js";
 
 export type ScrapedAccount = NonNullable<ScraperScrapingResult["accounts"]>[number];
 
-const SCRAPE_TIMEOUT_MS = 120_000;
 const LOGIN_PROBE_INTERVAL_MS = 2_000;
+
+/**
+ * Where persistent Chromium profiles live, if set (SCRAPER_USER_DATA_DIR). Each
+ * saved connection gets its own profile directory, so everything the bank
+ * stores on the device — cookies, localStorage, IndexedDB, the lot — survives
+ * between runs on this machine. On Cloud Run the filesystem is ephemeral, so
+ * there the encrypted session stored with the connection does that job (see
+ * browserSession.ts); both can be active at once.
+ */
+const PROFILE_ROOT = process.env.SCRAPER_USER_DATA_DIR || undefined;
+
+export interface RunScrapeOptions {
+  headless?: boolean;
+  /** Device state from the previous scrape of this connection, restored before login. */
+  session?: BrowserSession;
+  /**
+   * Receives the device state at the end of the run — whenever the login got
+   * through, even if the scrape then failed — so the trust the bank just
+   * granted this device isn't lost with the browser.
+   */
+  onSession?: (session: BrowserSession) => void | Promise<void>;
+  /** Names the on-disk profile under SCRAPER_USER_DATA_DIR; without it the browser is profile-less. */
+  profileId?: string;
+}
+
+/** The profile directory for `profileId`, if persistent profiles are enabled. */
+export function profileDir(profileId: string | undefined): string | undefined {
+  if (!PROFILE_ROOT || !profileId) return undefined;
+  // Profile ids are connection UUIDs; keep the path safe regardless.
+  return join(PROFILE_ROOT, profileId.replace(/[^A-Za-z0-9_-]/g, "_"));
+}
 
 // Required to run Chromium as root inside a container without a user namespace
 // sandbox; --disable-dev-shm-usage avoids crashes from Docker's tiny /dev/shm.
@@ -80,24 +114,30 @@ export function redact(text: string, credentials: Record<string, string>) {
 }
 
 /**
- * Runs one scrape in a fresh headless browser. Credentials only live in this
- * call's memory and are handed straight to the scraper; the browser (and with
- * it every cookie/session the bank set) is closed whether the scrape
- * succeeds, fails or times out.
+ * Runs one scrape in a headless browser. Credentials only live in this call's
+ * memory and are handed straight to the scraper. The browser is closed
+ * whether the scrape succeeds, fails or times out; what survives it is the
+ * device state the bank set (see browserSession.ts), handed to `onSession`,
+ * and — with SCRAPER_USER_DATA_DIR — the on-disk profile.
  */
 export async function runScrape(
   companyId: CompanyTypes,
   credentials: Record<string, string>,
   startDate: Date,
-  { headless = true }: { headless?: boolean } = {},
+  { headless = true, session, onSession, profileId }: RunScrapeOptions = {},
 ): Promise<ScrapedAccount[]> {
+  const userDataDir = profileDir(profileId);
+  if (userDataDir) mkdirSync(userDataDir, { recursive: true });
+
   const browser = await puppeteer.launch({
     headless,
     args: BROWSER_ARGS,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    userDataDir,
   });
   let timer: NodeJS.Timeout | undefined;
   let probeTimer: NodeJS.Timeout | undefined;
+  let loggedIn = false;
 
   try {
     let page: Page | undefined;
@@ -110,7 +150,17 @@ export async function runScrape(
       defaultTimeout: 60_000,
       preparePage: async (p) => {
         page = p;
+        // Before the first navigation, so the bank's login page already sees
+        // the device it trusted last time.
+        if (session) {
+          await restoreBrowserSession(browser, p, session).catch((err) => {
+            console.warn(JSON.stringify({ event: "session_restore_failed", companyId, error: String(err) }));
+          });
+        }
       },
+    });
+    scraper.onProgress((_, { type }) => {
+      if (type === "LOGIN_SUCCESS") loggedIn = true;
     });
 
     const scrape = scraper.scrape(credentials as ScraperCredentials);
@@ -125,10 +175,6 @@ export async function runScrape(
     const racers: Promise<unknown>[] = [scrape, timeout];
     const probe = LOGIN_ERROR_PROBES[companyId];
     if (probe) {
-      let loggedIn = false;
-      scraper.onProgress((_, { type }) => {
-        if (type === "LOGIN_SUCCESS") loggedIn = true;
-      });
       racers.push(
         new Promise<never>((_, reject) => {
           let busy = false;
@@ -158,6 +204,16 @@ export async function runScrape(
   } finally {
     clearTimeout(timer);
     clearInterval(probeTimer);
+    // Capture the device state while the browser is still open. A login that
+    // got through is worth keeping even when the fetch after it failed.
+    if (loggedIn && onSession) {
+      try {
+        const exported = await exportBrowserSession(browser);
+        if (exported) await onSession(exported);
+      } catch (err) {
+        console.warn(JSON.stringify({ event: "session_export_failed", companyId, error: String(err) }));
+      }
+    }
     await browser.close().catch(() => {});
   }
 }

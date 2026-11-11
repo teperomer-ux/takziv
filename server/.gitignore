@@ -4,3 +4,4 @@ build
 # Service-account keys (never commit)
 *-firebase-adminsdk-*.json
 service-account*.json
+.profiles

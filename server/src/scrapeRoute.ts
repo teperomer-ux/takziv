@@ -5,6 +5,7 @@ import { requireGoogleUser } from "./auth.js";
 import { sendError } from "./errors.js";
 import { missingLoginFields } from "./scrapeRunner.js";
 import { syncProvider } from "./scraperService.js";
+import { loadSession } from "./connectionRepository.js";
 import { isValidStartDate, withProviderSlot } from "./connectionSync.js";
 import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
@@ -45,7 +46,15 @@ scrapeRouter.post("/api/scrape-transactions", requireGoogleUser, async (req, res
   try {
     const request = { provider: companyId, credentials, startDate: start };
     credentials = undefined;
-    const result = await withProviderSlot(uid, companyId, () => syncProvider(uid, request));
+    // Nothing is stored, but if this provider is also a saved connection its
+    // device state is reused so the bank doesn't see yet another new device.
+    const result = await withProviderSlot(uid, companyId, async (connectionId) =>
+      syncProvider(uid, {
+        ...request,
+        session: connectionId ? (await loadSession(uid, connectionId)) ?? undefined : undefined,
+        profileId: connectionId,
+      }),
+    );
     const body = syncResponseBody(result);
     log("success", { saved: body.savedCount, duplicates: body.duplicateCount });
     res.json({ success: true, companyId, ...body });

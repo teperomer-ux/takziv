@@ -8,21 +8,29 @@ import {
   encryptCredentials,
   kmsKeyWrapper,
   localKeyWrapper,
+  openJson,
+  sealJson,
   type CredentialEnvelope,
   type KeyWrapper,
 } from "./credentialVault.js";
+import { isUsableSession, type BrowserSession } from "./browserSession.js";
 import { loadOrCreateLocalKey } from "./localKey.js";
+import { SCRAPE_TIMEOUT_MS } from "./syncSupport.js";
 
 /**
  * Storage for saved bank connections, split in two:
  *
- *   bankSecrets/{connectionId}                  encrypted credentials. Firestore
- *                                               rules deny every client read and
- *                                               write; only the Admin SDK reaches it.
+ *   bankSecrets/{connectionId}                  encrypted credentials, and the
+ *                                               encrypted browser session (the
+ *                                               device state the bank set on the
+ *                                               last login). Firestore rules deny
+ *                                               every client read and write; only
+ *                                               the Admin SDK reaches it.
  *   users/{uid}/bankConnections/{connectionId}  non-secret status (provider,
- *                                               masked login, last sync) that the
- *                                               API returns to the owner, plus
- *                                               the sync lease (syncLockUntil,
+ *                                               masked login, last sync, when the
+ *                                               session was saved) that the API
+ *                                               returns to the owner, plus the
+ *                                               sync lease (syncLockUntil,
  *                                               syncLeaseToken).
  *
  * Credentials are wrapped with Cloud KMS when KMS_CREDENTIALS_KEY is set, and
@@ -47,6 +55,8 @@ export interface BankConnection {
   startDate: string | null;
   /** YYYY-MM-DD back to which transactions have actually been fetched. */
   syncedFrom: string | null;
+  /** When the browser session (trusted-device state) was last captured; null if never. */
+  sessionSavedAt: Date | null;
 }
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
@@ -57,6 +67,8 @@ interface SecretDoc {
   companyId: CompanyTypes;
   keySource: KeySource;
   envelope: CredentialEnvelope;
+  /** Absent until the first login that got through. */
+  session?: { keySource: KeySource; envelope: CredentialEnvelope; savedAt: Timestamp };
 }
 
 let vault: { source: KeySource; wrapper: KeyWrapper } | undefined;
@@ -98,6 +110,7 @@ function toConnection(id: string, data: FirebaseFirestore.DocumentData): BankCon
     lastSyncAt: (data.lastSyncAt as Timestamp | null)?.toDate() ?? null,
     startDate: ymdOrNull(data.startDate),
     syncedFrom: ymdOrNull(data.syncedFrom),
+    sessionSavedAt: (data.sessionSavedAt as Timestamp | null | undefined)?.toDate() ?? null,
   };
 }
 
@@ -113,29 +126,39 @@ export async function getConnection(uid: string, connectionId: string): Promise<
 }
 
 /**
- * Stores credentials for a provider, replacing the user's existing connection
+ * Stores credentials for a provider, updating the user's existing connection
  * to that provider if there is one (one saved login per provider). Call only
  * after the credentials logged in successfully.
+ *
+ * Re-saving keeps the connection id — and with it the transactions, start
+ * date and sync history tied to it — and keeps the stored browser session
+ * unless a fresher one from this login is given.
  */
 export async function saveConnection(
   uid: string,
   companyId: CompanyTypes,
   credentials: Record<string, string>,
-  { synced, startDate }: { synced: boolean; startDate: string },
+  { synced, startDate, session }: { synced: boolean; startDate: string; session?: BrowserSession | null },
 ): Promise<BankConnection> {
   const existingId = await findConnectionId(uid, companyId);
   const connectionId = existingId ?? randomUUID();
   const { source, wrapper } = getVault();
   const envelope = await encryptCredentials(wrapper, uid, connectionId, credentials);
+  const sessionFields = session ? await sealSession(uid, connectionId, session) : undefined;
 
   const batch = adminDb.batch();
-  batch.set(adminDb.collection(SECRETS).doc(connectionId), {
-    uid,
-    companyId,
-    keySource: source,
-    envelope,
-    updatedAt: FieldValue.serverTimestamp(),
-  });
+  batch.set(
+    adminDb.collection(SECRETS).doc(connectionId),
+    {
+      uid,
+      companyId,
+      keySource: source,
+      envelope,
+      updatedAt: FieldValue.serverTimestamp(),
+      ...(sessionFields && { session: sessionFields.secret }),
+    },
+    { merge: true },
+  );
   batch.set(
     connectionsCol(uid).doc(connectionId),
     {
@@ -143,9 +166,10 @@ export async function saveConnection(
       status: "active",
       maskedLogin: maskLogin(companyId, credentials),
       lastErrorCode: null,
-      ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null }),
+      ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null, sessionSavedAt: null }),
       startDate,
       ...(synced && { lastSyncAt: FieldValue.serverTimestamp(), syncedFrom: startDate }),
+      ...(sessionFields && { sessionSavedAt: sessionFields.savedAt }),
     },
     { merge: true },
   );
@@ -153,7 +177,12 @@ export async function saveConnection(
   return getConnection(uid, connectionId);
 }
 
-/** Decrypts a connection's stored credentials. */
+/**
+ * Decrypts a connection's stored credentials, and the browser session saved
+ * with them if there is a usable one. A session that can't be read (saved
+ * under another key, corrupt, too old) is simply reported as absent: the
+ * scrape still works without it, it just may be asked for a one-time code.
+ */
 export async function loadCredentials(uid: string, connectionId: string) {
   const secret = await getOwnedSecret(uid, connectionId);
   const { source, wrapper } = getVault();
@@ -161,7 +190,50 @@ export async function loadCredentials(uid: string, connectionId: string) {
     throw new CredentialVaultError(`Connection was saved with the ${secret.keySource} key, server is using ${source}`);
   }
   const credentials = await decryptCredentials(wrapper, uid, connectionId, secret.envelope);
-  return { companyId: secret.companyId, credentials };
+  return { companyId: secret.companyId, credentials, session: await openSession(uid, connectionId, secret) };
+}
+
+/** The connection's saved browser session, or null when there is none it can use. Never throws. */
+export async function loadSession(uid: string, connectionId: string): Promise<BrowserSession | null> {
+  try {
+    return await openSession(uid, connectionId, await getOwnedSecret(uid, connectionId));
+  } catch {
+    return null;
+  }
+}
+
+async function openSession(uid: string, connectionId: string, secret: SecretDoc): Promise<BrowserSession | null> {
+  const stored = secret.session;
+  if (!stored) return null;
+  const { source, wrapper } = getVault();
+  if (stored.keySource !== source) return null;
+  try {
+    const session = await openJson<BrowserSession>(wrapper, uid, connectionId, stored.envelope, "bank-session");
+    return isUsableSession(session) ? session : null;
+  } catch (err) {
+    console.warn(JSON.stringify({ event: "session_unreadable", connectionId, error: String(err) }));
+    return null;
+  }
+}
+
+async function sealSession(uid: string, connectionId: string, session: BrowserSession) {
+  const { source, wrapper } = getVault();
+  const savedAt = Timestamp.fromMillis(session.savedAt);
+  const envelope = await sealJson(wrapper, uid, connectionId, session, "bank-session");
+  return { secret: { keySource: source, envelope, savedAt }, savedAt };
+}
+
+/**
+ * Stores the browser session captured by a scrape of this connection,
+ * replacing the previous one. Only the owner's connection is written.
+ */
+export async function saveSession(uid: string, connectionId: string, session: BrowserSession) {
+  await getOwnedSecret(uid, connectionId);
+  const { secret, savedAt } = await sealSession(uid, connectionId, session);
+  const batch = adminDb.batch();
+  batch.update(adminDb.collection(SECRETS).doc(connectionId), { session: secret });
+  batch.update(connectionsCol(uid).doc(connectionId), { sessionSavedAt: savedAt });
+  await batch.commit();
 }
 
 export async function updateConnectionStatus(
@@ -209,11 +281,11 @@ export async function listActiveConnections(): Promise<{ uid: string; connection
 }
 
 /**
- * How long a sync may hold a connection. Longer than the 120s scrape timeout
- * plus the Firestore writes, so a live sync never loses its lease; short
- * enough that a crashed instance only blocks the connection briefly.
+ * How long a sync may hold a connection. Longer than the scrape timeout plus
+ * the Firestore writes, so a live sync never loses its lease; short enough
+ * that a crashed instance only blocks the connection briefly.
  */
-export const SYNC_LEASE_TTL_MS = 3 * 60 * 1000;
+export const SYNC_LEASE_TTL_MS = SCRAPE_TIMEOUT_MS + 60 * 1000;
 
 export type SyncLease =
   | { acquired: true; token: string; connection: BankConnection }

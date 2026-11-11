@@ -4,6 +4,13 @@ import type { SyncOutcome } from "./scraperService.js";
 
 export const MAX_CONCURRENT_SCRAPES = Math.max(1, Number(process.env.MAX_CONCURRENT_SCRAPES ?? 2));
 
+/**
+ * How long one scrape (login + fetch) may take. SCRAPE_TIMEOUT_MS raises it,
+ * e.g. for a visible-browser run where the user completes a one-time code by
+ * hand; never below 30s.
+ */
+export const SCRAPE_TIMEOUT_MS = Math.max(30_000, Number(process.env.SCRAPE_TIMEOUT_MS) || 120_000);
+
 /** A saved connection is due for a scheduled sync once its last sync is this old. */
 export const SYNC_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 

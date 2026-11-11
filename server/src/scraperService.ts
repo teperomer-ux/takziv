@@ -1,18 +1,21 @@
 import type { CompanyTypes } from "israeli-bank-scrapers";
 import { ApiError } from "./errors.js";
-import { missingLoginFields, runScrape } from "./scrapeRunner.js";
+import { missingLoginFields, runScrape, type RunScrapeOptions } from "./scrapeRunner.js";
 import { mapScrapedTransactions, type MapResult, type UserMappings } from "./transactionMapper.js";
 import { getUserMappings, saveNewTransactions, type SaveResult } from "./transactionRepository.js";
 
 /**
  * The one entry point for fetching a provider's transactions, shared by the
- * HTTP route, the local test script and (later) the scheduled sync job.
+ * HTTP route, the local test script and the scheduled sync job.
  *
  * The scrape runs in a local headless Chromium that talks straight to the
- * bank's own website; credentials go nowhere else and are not stored.
+ * bank's own website; credentials go nowhere else and are not stored here.
+ * The device state the bank sets (cookies, localStorage) is passed in and
+ * out through `session` / `onSession` so saved connections keep being
+ * recognised as the same device.
  */
 
-export interface ScrapeRequest {
+export interface ScrapeRequest extends RunScrapeOptions {
   /** israeli-bank-scrapers company id: "max", "isracard", "visaCal", "hapoalim", … */
   provider: CompanyTypes;
   /** The provider's login fields (see SCRAPERS[provider].loginFields). */
@@ -20,7 +23,6 @@ export interface ScrapeRequest {
   startDate: Date;
   /** Inclusive. Scrapers always fetch up to today; later rows are dropped here. */
   endDate?: Date;
-  headless?: boolean;
 }
 
 export interface ScrapeOutcome extends MapResult {
@@ -42,7 +44,7 @@ export async function scrapeProvider(
   request: ScrapeRequest,
   mappings: UserMappings = { expense: [], income: [] },
 ): Promise<ScrapeOutcome> {
-  const { provider, credentials, startDate, endDate, headless } = request;
+  const { provider, credentials, startDate, endDate, ...runOptions } = request;
 
   const missing = missingLoginFields(provider, credentials);
   if (missing.length) throw new ApiError("MISSING_CREDENTIAL_FIELDS", { missing });
@@ -50,7 +52,7 @@ export async function scrapeProvider(
     throw new ApiError("INVALID_REQUEST", { fields: ["startDate", "endDate"] });
   }
 
-  const accounts = await runScrape(provider, credentials, startDate, { headless });
+  const accounts = await runScrape(provider, credentials, startDate, runOptions);
   const mapped = mapScrapedTransactions(provider, accounts, mappings);
 
   let skippedOutOfRange = 0;

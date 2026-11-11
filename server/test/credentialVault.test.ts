@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import {
   CredentialVaultError,
+  VaultUnavailableError,
   decryptCredentials,
   encryptCredentials,
+  isTransientVaultError,
+  openJson,
+  sealJson,
   type KeyWrapper,
 } from "../src/credentialVault.js";
 
@@ -103,4 +107,27 @@ test("KMS failures don't leak their error details", async () => {
     assert.ok(!err.message.includes("uid-1"));
     return true;
   });
+});
+
+test("a KMS outage is reported as unavailable, not as an unreadable record", async () => {
+  const kms: KeyWrapper = {
+    wrap: fakeKms().wrap,
+    unwrap: async () => {
+      throw Object.assign(new Error("14 UNAVAILABLE: connection reset"), { code: 14 });
+    },
+  };
+  const env = await encryptCredentials(kms, "uid-1", "conn-1", creds);
+  await assert.rejects(decryptCredentials(kms, "uid-1", "conn-1", env), VaultUnavailableError);
+  assert.equal(isTransientVaultError(Object.assign(new Error(), { code: "ECONNRESET" })), true);
+  assert.equal(isTransientVaultError(Object.assign(new Error(), { code: 7 /* PERMISSION_DENIED */ })), false);
+  assert.equal(isTransientVaultError(new Error("bad tag")), false);
+});
+
+test("a browser session sealed for a connection round-trips, and can't be presented as its credentials", async () => {
+  const kms = fakeKms();
+  const session = { v: 1, savedAt: 1, cookies: [{ name: "d", value: "x", domain: ".b" }], localStorage: {} };
+  const env = await sealJson(kms, "uid-1", "conn-1", session, "bank-session");
+  assert.deepEqual(await openJson(kms, "uid-1", "conn-1", env, "bank-session"), session);
+  await assert.rejects(decryptCredentials(kms, "uid-1", "conn-1", env), CredentialVaultError);
+  await assert.rejects(openJson(kms, "uid-1", "conn-2", env, "bank-session"), CredentialVaultError);
 });

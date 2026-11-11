@@ -18,3 +18,6 @@ server/build/
 
 # Local key that encrypts saved bank credentials (never commit)
 server/.secrets/
+
+# Persistent Chromium profiles for bank scrapes (SCRAPER_USER_DATA_DIR); hold bank cookies
+server/.profiles/

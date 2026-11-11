@@ -8,9 +8,11 @@ import {
   getConnection,
   loadCredentials,
   releaseSyncLease,
+  saveSession,
   updateConnectionStatus,
   type BankConnection,
 } from "./connectionRepository.js";
+import { CredentialVaultError } from "./credentialVault.js";
 import { REQUIRES_ACTION, acquireBrowserSlot } from "./syncSupport.js";
 
 /**
@@ -50,6 +52,20 @@ export function isValidStartDate(ymd: string, now = new Date()) {
   if (new Date(ymd).toISOString().slice(0, 10) !== ymd) return false;
   const earliest = israelYmd(new Date(now.getTime() - MAX_LOOKBACK_DAYS * 86_400_000));
   return ymd <= israelYmd(now) && ymd >= earliest;
+}
+
+/**
+ * Flagged connections whose saved login is still fine and may be retried by
+ * the user without typing it again. A one-time-code prompt means the bank
+ * didn't recognise the device, not that the password is wrong; retrying it
+ * can't lock the account, and once the bank trusts the device again (or the
+ * code requirement lapses) the sync goes through and clears the flag.
+ */
+const RETRY_SAFE_ATTENTION: ReadonlySet<string> = new Set(["BANK_OTP_REQUIRED"]);
+
+/** True if a needs_attention connection can be synced again with its stored credentials. */
+export function canRetryWithoutNewCredentials(c: Pick<BankConnection, "status" | "lastErrorCode">) {
+  return c.status === "needs_attention" && !!c.lastErrorCode && RETRY_SAFE_ATTENTION.has(c.lastErrorCode);
 }
 
 /** True if the user moved the start date before what has been fetched so far. */
@@ -121,9 +137,12 @@ async function withBrowserSlot<T>(fn: () => Promise<T>) {
  * → decrypt → scrape and save → status update → release. `startDate`
  * overrides the window for this sync only (see syncWindow).
  *
- * Never retries a login the bank already rejected (status needs_attention) —
- * that's how bank accounts get locked — and flags the connection when the
- * bank rejects it now.
+ * Never retries a login the bank already rejected (status needs_attention
+ * over the credentials themselves) — that's how bank accounts get locked —
+ * and flags the connection when the bank rejects it now. A connection
+ * flagged only for a one-time code may be retried (see
+ * canRetryWithoutNewCredentials); the scheduled job never does, as it only
+ * picks active connections.
  */
 export async function syncSavedConnection(
   uid: string,
@@ -137,7 +156,7 @@ export async function syncSavedConnection(
     // The lease is checked first, before any status read, so the status can't
     // change between the check and the login: only lease holders write it.
     withLease(uid, connectionId, async (connection) => {
-      if (connection.status === "needs_attention") {
+      if (connection.status === "needs_attention" && !canRetryWithoutNewCredentials(connection)) {
         throw new ApiError("CONNECTION_NEEDS_ATTENTION", { lastErrorCode: connection.lastErrorCode });
       }
 
@@ -147,7 +166,14 @@ export async function syncSavedConnection(
           // loadCredentials also checks the secret belongs to `uid`.
           stored = await loadCredentials(uid, connectionId);
         } catch (err) {
-          // Key missing/changed: the saved login is unusable until re-entered.
+          // Only a record that can't be read with this key — missing, wrong
+          // key, failed integrity check — makes the saved login unusable. A
+          // KMS or Firestore outage is reported as such and leaves the
+          // connection active: the next sync will read it fine.
+          const unreadable = err instanceof CredentialVaultError || err instanceof ConnectionNotFoundError;
+          if (!unreadable) {
+            throw new ApiError("CREDENTIAL_STORE_UNAVAILABLE", { internalMessage: String(err) });
+          }
           await updateConnectionStatus(uid, connectionId, {
             status: "needs_attention",
             lastErrorCode: "CREDENTIALS_UNREADABLE",
@@ -163,6 +189,14 @@ export async function syncSavedConnection(
           provider: stored.companyId,
           credentials: stored.credentials,
           startDate: start,
+          session: stored.session ?? undefined,
+          profileId: connectionId,
+          // Stored as soon as the login got through, before the result is
+          // known, so a failed fetch doesn't cost the device's trust.
+          onSession: (session) =>
+            saveSession(uid, connectionId, session).catch((e) =>
+              console.error(JSON.stringify({ event: "session_save_failed", connectionId, error: String(e) })),
+            ),
         });
         await updateConnectionStatus(uid, connectionId, {
           status: "active",
@@ -190,11 +224,16 @@ export async function syncSavedConnection(
  * lease of the user's saved connection to the same provider, if there is one,
  * so a scheduled sync can't log in to that account at the same moment.
  * Unlike syncSavedConnection this doesn't refuse needs_attention — re-entering
- * the login is how the user fixes it.
+ * the login is how the user fixes it. `fn` gets that connection's id so it
+ * can reuse the device state saved with it.
  */
-export async function withProviderSlot<T>(uid: string, companyId: CompanyTypes, fn: () => Promise<T>) {
+export async function withProviderSlot<T>(
+  uid: string,
+  companyId: CompanyTypes,
+  fn: (connectionId: string | undefined) => Promise<T>,
+) {
   return withBrowserSlot(async () => {
     const connectionId = await findConnectionId(uid, companyId);
-    return connectionId ? withLease(uid, connectionId, () => fn()) : fn();
+    return connectionId ? withLease(uid, connectionId, () => fn(connectionId)) : fn(undefined);
   });
 }

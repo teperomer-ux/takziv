@@ -10,10 +10,12 @@ import {
   assertVaultReady,
   deleteConnection,
   listConnections,
+  loadSession,
   saveConnection,
   updateConnectionStartDate,
   type BankConnection,
 } from "./connectionRepository.js";
+import type { BrowserSession } from "./browserSession.js";
 import { defaultStartYmd, isValidStartDate, syncSavedConnection, withProviderSlot } from "./connectionSync.js";
 import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
@@ -40,7 +42,11 @@ function invalidStartDate(res: Response) {
 }
 
 function toJson(c: BankConnection) {
-  return { ...c, lastSyncAt: c.lastSyncAt?.toISOString() ?? null };
+  return {
+    ...c,
+    lastSyncAt: c.lastSyncAt?.toISOString() ?? null,
+    sessionSavedAt: c.sessionSavedAt?.toISOString() ?? null,
+  };
 }
 
 function parseId(id: unknown, res: Response) {
@@ -62,7 +68,9 @@ connectionsRouter.get("/api/connections", async (_req, res) => {
 /**
  * Connects (or re-connects) a provider: logs in and imports once, and stores
  * the credentials only if that login worked — a wrong password is never saved
- * and so never retried automatically.
+ * and so never retried automatically. Re-connecting keeps the existing
+ * connection (same id, transactions, start date) and its saved device state,
+ * which this login reuses and refreshes.
  */
 connectionsRouter.post("/api/connections", async (req, res) => {
   const uid: string = res.locals.uid;
@@ -90,11 +98,25 @@ connectionsRouter.post("/api/connections", async (req, res) => {
 
   const log = syncLogger({ uid, companyId, via: "connect" });
   try {
-    const { result, connection } = await withProviderSlot(uid, companyId, async () => {
-      const result = await syncProvider(uid, { provider: companyId, credentials: credentials!, startDate });
+    const { result, connection } = await withProviderSlot(uid, companyId, async (existingId) => {
+      const captured: { session: BrowserSession | null } = { session: null };
+      const result = await syncProvider(uid, {
+        provider: companyId,
+        credentials: credentials!,
+        startDate,
+        session: existingId ? (await loadSession(uid, existingId)) ?? undefined : undefined,
+        profileId: existingId,
+        onSession: (s) => {
+          captured.session = s;
+        },
+      });
       return {
         result,
-        connection: await saveConnection(uid, companyId, credentials!, { synced: true, startDate: startYmd }),
+        connection: await saveConnection(uid, companyId, credentials!, {
+          synced: true,
+          startDate: startYmd,
+          session: captured.session,
+        }),
       };
     });
     credentials = undefined;

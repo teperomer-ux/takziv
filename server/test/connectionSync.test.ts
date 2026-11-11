@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isValidStartDate, needsBackfill, syncWindow } from "../src/connectionSync.js";
+import { canRetryWithoutNewCredentials, isValidStartDate, needsBackfill, syncWindow } from "../src/connectionSync.js";
 
 const now = new Date("2026-10-24T09:00:00Z");
 const day = 86_400_000;
@@ -60,4 +60,12 @@ test("connections saved before start dates existed keep the old behaviour", () =
   const w = syncWindow({ startDate: null, syncedFrom: null, lastSyncAt: new Date("2026-10-23T00:00:00Z") }, undefined, now);
   assert.equal(ymd(w.start), "2026-10-16");
   assert.equal(w.fetchedFrom, undefined);
+});
+
+test("a connection flagged for a one-time code may be retried with its stored login; rejected logins may not", () => {
+  assert.equal(canRetryWithoutNewCredentials({ status: "needs_attention", lastErrorCode: "BANK_OTP_REQUIRED" }), true);
+  for (const code of ["BANK_INVALID_CREDENTIALS", "BANK_ACCOUNT_BLOCKED", "BANK_CHANGE_PASSWORD", "CREDENTIALS_UNREADABLE", null]) {
+    assert.equal(canRetryWithoutNewCredentials({ status: "needs_attention", lastErrorCode: code }), false, String(code));
+  }
+  assert.equal(canRetryWithoutNewCredentials({ status: "active", lastErrorCode: "BANK_OTP_REQUIRED" }), false);
 });

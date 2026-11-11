@@ -35,7 +35,25 @@ export interface KeyWrapper {
   unwrap(ciphertext: Buffer, aad: Buffer): Promise<Buffer>;
 }
 
+/** The record can't be read with this key: wrong key, wrong owner, tampered or corrupt. Re-entering fixes it. */
 export class CredentialVaultError extends Error {}
+
+/** The key service couldn't be reached right now; the record is fine and a retry will read it. */
+export class VaultUnavailableError extends Error {}
+
+// gRPC status codes KMS returns for outages, not for bad input: DEADLINE_EXCEEDED,
+// RESOURCE_EXHAUSTED, INTERNAL, UNAVAILABLE.
+const TRANSIENT_GRPC_CODES = new Set([4, 8, 13, 14]);
+const TRANSIENT_ERRNO = new Set(["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE"]);
+
+/** True for a KMS/network failure that says nothing about the record itself. */
+export function isTransientVaultError(err: unknown): boolean {
+  const code = (err as { code?: unknown })?.code;
+  return (typeof code === "number" && TRANSIENT_GRPC_CODES.has(code)) || (typeof code === "string" && TRANSIENT_ERRNO.has(code));
+}
+
+/** What a record protects; part of the AAD so a blob of one kind can't be presented as another. */
+export type VaultScope = "bank-credentials" | "bank-session";
 
 /** Wraps data keys with a Cloud KMS symmetric key (projects/…/cryptoKeys/…). */
 export function kmsKeyWrapper(keyName: string, client = new KeyManagementServiceClient()): KeyWrapper {
@@ -76,21 +94,41 @@ export function localKeyWrapper(key: Buffer): KeyWrapper {
   };
 }
 
-function aadFor(uid: string, connectionId: string) {
+function aadFor(uid: string, connectionId: string, scope: VaultScope) {
   if (!uid || !connectionId) throw new CredentialVaultError("uid and connectionId are required");
-  return Buffer.from(`takziv:bank-credentials:v${ENVELOPE_VERSION}:${uid}:${connectionId}`, "utf8");
+  return Buffer.from(`takziv:${scope}:v${ENVELOPE_VERSION}:${uid}:${connectionId}`, "utf8");
 }
 
-export async function encryptCredentials(
+export function encryptCredentials(
   wrapper: KeyWrapper,
   uid: string,
   connectionId: string,
   credentials: Record<string, string>,
 ): Promise<CredentialEnvelope> {
-  const aad = aadFor(uid, connectionId);
+  return sealJson(wrapper, uid, connectionId, credentials, "bank-credentials");
+}
+
+export function decryptCredentials(
+  wrapper: KeyWrapper,
+  uid: string,
+  connectionId: string,
+  envelope: CredentialEnvelope,
+): Promise<Record<string, string>> {
+  return openJson(wrapper, uid, connectionId, envelope, "bank-credentials");
+}
+
+/** Seals any JSON value under the same envelope scheme as credentials, bound to `scope`. */
+export async function sealJson(
+  wrapper: KeyWrapper,
+  uid: string,
+  connectionId: string,
+  value: unknown,
+  scope: VaultScope,
+): Promise<CredentialEnvelope> {
+  const aad = aadFor(uid, connectionId, scope);
   const dek = randomBytes(32);
   const iv = randomBytes(12);
-  const plaintext = Buffer.from(JSON.stringify(credentials), "utf8");
+  const plaintext = Buffer.from(JSON.stringify(value), "utf8");
 
   try {
     const cipher = createCipheriv("aes-256-gcm", dek, iv);
@@ -112,19 +150,23 @@ export async function encryptCredentials(
   }
 }
 
-export async function decryptCredentials(
+export async function openJson<T = unknown>(
   wrapper: KeyWrapper,
   uid: string,
   connectionId: string,
   envelope: CredentialEnvelope,
-): Promise<Record<string, string>> {
+  scope: VaultScope,
+): Promise<T> {
   if (envelope?.v !== ENVELOPE_VERSION) throw new CredentialVaultError("Unsupported envelope version");
-  const aad = aadFor(uid, connectionId);
+  const aad = aadFor(uid, connectionId, scope);
 
   let dek: Buffer;
   try {
     dek = await wrapper.unwrap(Buffer.from(envelope.wrappedDek, "base64"), aad);
-  } catch {
+  } catch (err) {
+    // An outage must not be mistaken for a bad record: the caller would flag
+    // the connection and make the user re-enter a login that still works.
+    if (isTransientVaultError(err)) throw new VaultUnavailableError("Key service unavailable");
     // Don't surface KMS error details: they can echo request fields.
     throw new CredentialVaultError("Could not unwrap data key");
   }

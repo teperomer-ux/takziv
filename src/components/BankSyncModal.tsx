@@ -3,6 +3,7 @@ import { Check, Loader2, Plus, RefreshCw, AlertTriangle } from "lucide-react";
 import {
   syncBankTransactions,
   BankSyncError,
+  connectionState,
   needsBackfill,
   type BankConnection,
   type BankSyncErrorCode,
@@ -11,7 +12,7 @@ import {
 import { useBankSync } from "../hooks/useBankSync";
 import { useSettings } from "../hooks/useSettings";
 import { INSTITUTIONS, findInstitution, type LoginField } from "../constants/institutions";
-import { ERROR_MESSAGES, attentionReason, syncErrorMessage } from "../constants/bankSyncMessages";
+import { CONNECTION_STATE_LABELS, ERROR_MESSAGES, attentionReason, syncErrorMessage } from "../constants/bankSyncMessages";
 import type { TransactionSource } from "../types";
 import { formatDate } from "../utils/formatDate";
 
@@ -478,7 +479,19 @@ function ConnectionCard({
   }
   const institution = findInstitution(connection.companyId);
   const needsAttention = connection.status === "needs_attention";
-  const lastFailed = !needsAttention && connection.lastErrorCode;
+  const state = connectionState(connection);
+  const stateMeta = CONNECTION_STATE_LABELS[state];
+  // session_expired keeps the stored login: the user can retry without typing it again.
+  const canRetry = state === "session_expired";
+  const lastFailed = state === "unstable";
+  const dotClass =
+    state === "active" ? "bg-emerald-500" : state === "unstable" ? "bg-rose-500" : "bg-amber-500";
+  const stateClass =
+    state === "active"
+      ? "text-emerald-700 dark:text-emerald-400"
+      : state === "unstable"
+        ? "text-rose-600 dark:text-rose-400"
+        : "text-amber-700 dark:text-amber-400 font-semibold";
 
   return (
     <div
@@ -503,16 +516,24 @@ function ConnectionCard({
             <span className="text-xs font-normal text-slate-400 tabular-nums" dir="ltr">{connection.maskedLogin}</span>
           </p>
           <p className="flex items-center gap-1.5 text-xs mt-0.5">
-            <span className={`h-2 w-2 rounded-full ${needsAttention ? "bg-amber-500" : "bg-emerald-500"}`} />
-            <span className={needsAttention ? "text-amber-700 dark:text-amber-400 font-semibold" : "text-emerald-700 dark:text-emerald-400"}>
-              סטטוס: {needsAttention ? "נדרשת התערבות" : "מחובר"}
-            </span>
+            <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`} />
+            <span className={stateClass}>סטטוס: {stateMeta.label}</span>
           </p>
           <p className="text-[11px] text-slate-400 mt-0.5">
             {connection.lastSyncAt ? (
               <>סונכרן לאחרונה: <span dir="ltr" className="tabular-nums">{formatSyncTime(connection.lastSyncAt)}</span></>
             ) : (
               "טרם סונכרן"
+            )}
+          </p>
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            {connection.sessionSavedAt ? (
+              <>
+                מכשיר מהימן נשמר:{" "}
+                <span dir="ltr" className="tabular-nums">{formatSyncTime(connection.sessionSavedAt)}</span>
+              </>
+            ) : (
+              "מכשיר מהימן: יישמר בהתחברות המוצלחת הבאה"
             )}
           </p>
           {!editingDate && (
@@ -586,13 +607,14 @@ function ConnectionCard({
         </p>
       )}
       {lastFailed && (
-        <p className="text-[11px] text-rose-600 dark:text-rose-400 mt-2">
-          הסנכרון האחרון נכשל: {ERROR_MESSAGES[connection.lastErrorCode as BankSyncErrorCode] ?? connection.lastErrorCode}
+        <p className="text-[11px] text-rose-600 dark:text-rose-400 mt-2 leading-relaxed">
+          {ERROR_MESSAGES[connection.lastErrorCode as BankSyncErrorCode] ?? connection.lastErrorCode}
+          {stateMeta.hint && <span className="block text-slate-400 mt-0.5">{stateMeta.hint}</span>}
         </p>
       )}
 
       <div className="flex items-center gap-2 mt-3">
-        {needsAttention ? (
+        {needsAttention && !canRetry ? (
           <button
             type="button"
             onClick={onUpdateCredentials}
@@ -600,6 +622,26 @@ function ConnectionCard({
           >
             עדכון פרטי התחברות
           </button>
+        ) : canRetry ? (
+          <>
+            <button
+              type="button"
+              onClick={onSync}
+              disabled={syncing || anotherSyncing}
+              className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 text-white px-4 py-2.5 text-sm font-semibold shadow-sm hover:bg-amber-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed min-h-[44px]"
+            >
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              {syncing ? "מסנכרן…" : "נסה שוב"}
+            </button>
+            <button
+              type="button"
+              onClick={onUpdateCredentials}
+              disabled={syncing}
+              className="rounded-xl px-3 py-2.5 text-xs font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-100/60 dark:hover:bg-amber-900/30 transition-colors disabled:opacity-40 min-h-[44px]"
+            >
+              עדכון פרטים
+            </button>
+          </>
         ) : (
           <button
             type="button"

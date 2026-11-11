@@ -1,4 +1,15 @@
-import type { BankSyncErrorCode } from "../services/bankSyncService";
+import type { BankSyncErrorCode, ConnectionState } from "../services/bankSyncService";
+
+/** Status label and explanation per connection state (see connectionState). */
+export const CONNECTION_STATE_LABELS: Record<ConnectionState, { label: string; hint: string }> = {
+  active: { label: "פעיל", hint: "" },
+  unstable: { label: "פעיל · הסנכרון האחרון נכשל", hint: "תקלה זמנית מול אתר הבנק. פרטי ההתחברות נשמרו ואפשר לסנכרן שוב." },
+  session_expired: {
+    label: "פג תוקף האימות",
+    hint: "הבנק ביקש קוד חד-פעמי (SMS) — הוא לא זיהה את המכשיר. פרטי ההתחברות תקינים: אפשר לנסות שוב בלי להזין אותם מחדש.",
+  },
+  reauth_required: { label: "נדרש אימות מחדש", hint: "" },
+};
 
 // Bank-side login failures, shared by the error-code and scraper-error maps below.
 const INVALID_CREDENTIALS = "פרטי ההתחברות (שם משתמש או סיסמה) שגויים. אנא בדקו את הפרטים ונסו שוב.";
@@ -54,7 +65,7 @@ export function syncErrorMessage(code: BankSyncErrorCode, details?: Record<strin
 /** Why a saved connection needs the user, from its `lastErrorCode`. */
 const ATTENTION_REASONS: Record<string, string> = {
   BANK_INVALID_CREDENTIALS: "הבנק דחה את פרטי ההתחברות השמורים. עדכנו אותם כדי להמשיך.",
-  BANK_OTP_REQUIRED: "הבנק דורש קוד חד-פעמי (SMS). היכנסו לאתר הבנק, ואז עדכנו את פרטי ההתחברות.",
+  BANK_OTP_REQUIRED: "הבנק דורש קוד חד-פעמי (SMS) כי לא זיהה את המכשיר. פרטי ההתחברות השמורים תקינים — נסו לסנכרן שוב.",
   BANK_CHANGE_PASSWORD: "הבנק מבקש להחליף סיסמה. החליפו אותה באתר הבנק ועדכנו כאן.",
   BANK_ACCOUNT_BLOCKED: "הגישה לחשבון חסומה. שחררו את החסימה מול הבנק ועדכנו את פרטי ההתחברות.",
   CREDENTIALS_UNREADABLE: "לא ניתן לפענח את פרטי ההתחברות השמורים. הזינו אותם מחדש.",

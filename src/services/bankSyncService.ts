@@ -49,11 +49,36 @@ export interface BankConnection {
   startDate: string | null;
   /** YYYY-MM-DD back to which transactions have actually been fetched. */
   syncedFrom: string | null;
+  /**
+   * ISO timestamp of the last time the server captured the bank's trusted-device
+   * state (cookies) for this connection; null until the first successful login.
+   */
+  sessionSavedAt: string | null;
 }
 
 /** The start date was moved before what's been fetched; the next sync backfills to it. */
 export function needsBackfill(c: BankConnection): boolean {
   return !!c.startDate && (!c.syncedFrom || c.startDate < c.syncedFrom);
+}
+
+/**
+ * What the user sees as the connection's state:
+ *  - active:          healthy
+ *  - unstable:        healthy, but the last sync failed on the bank's side (timeout, …); retried automatically
+ *  - session_expired: the bank stopped trusting the device and asked for a one-time code;
+ *                     the saved login is fine and can be retried without re-entering it
+ *  - reauth_required: the bank rejected the saved login (wrong/expired password, blocked, unreadable)
+ */
+export type ConnectionState = "active" | "unstable" | "session_expired" | "reauth_required";
+
+export function connectionState(c: Pick<BankConnection, "status" | "lastErrorCode">): ConnectionState {
+  if (c.status === "needs_attention") return c.lastErrorCode === "BANK_OTP_REQUIRED" ? "session_expired" : "reauth_required";
+  return c.lastErrorCode ? "unstable" : "active";
+}
+
+/** Mirrors the server: a session_expired connection syncs again with its stored login. */
+export function canRetryWithoutNewCredentials(c: Pick<BankConnection, "status" | "lastErrorCode">): boolean {
+  return connectionState(c) === "session_expired";
 }
 
 export interface ConnectionSyncResult extends BankSyncResult {

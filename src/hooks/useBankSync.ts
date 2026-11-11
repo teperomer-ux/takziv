@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   BankSyncError,
+  canRetryWithoutNewCredentials,
   connectAccount,
   listConnections,
   needsBackfill,
@@ -108,9 +109,10 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
         const needsAction =
           code === "CONNECTION_NEEDS_ATTENTION" ||
           ["BANK_INVALID_CREDENTIALS", "BANK_OTP_REQUIRED", "BANK_CHANGE_PASSWORD", "BANK_ACCOUNT_BLOCKED"].includes(code);
+        const heading = lastErrorCode === "BANK_OTP_REQUIRED" ? "פג תוקף האימות" : "נדרשת התערבות";
         setNotice(
           needsAction
-            ? { kind: "attention", text: `נדרשת התערבות — ${label}: ${attentionReason(lastErrorCode)}` }
+            ? { kind: "attention", text: `${heading} — ${label}: ${attentionReason(lastErrorCode)}` }
             : {
                 kind: "error",
                 text: `${label}: ${err instanceof BankSyncError ? syncErrorMessage(code, err.details) : ERROR_MESSAGES[code]}`,
@@ -162,11 +164,12 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     (async () => {
       for (const c of due) await syncNow(c.id);
     })();
-    if (connections.some((c) => c.status === "needs_attention")) {
-      const first = connections.find((c) => c.status === "needs_attention")!;
+    const flagged = connections.find((c) => c.status === "needs_attention");
+    if (flagged) {
+      const heading = canRetryWithoutNewCredentials(flagged) ? "פג תוקף האימות" : "נדרשת התערבות";
       setNotice({
         kind: "attention",
-        text: `נדרשת התערבות — ${institutionLabel(first.companyId)}: ${attentionReason(first.lastErrorCode)}`,
+        text: `${heading} — ${institutionLabel(flagged.companyId)}: ${attentionReason(flagged.lastErrorCode)}`,
       });
     }
   }, [settingsLoading, connectionsLoaded, settings.autoSyncOnStartup, connections, syncNow]);

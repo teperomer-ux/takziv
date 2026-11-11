@@ -16,6 +16,8 @@ import { adminAuth } from "../src/firebaseAdmin.js";
 import { ApiError } from "../src/errors.js";
 import { missingLoginFields } from "../src/scrapeRunner.js";
 import { scrapeProvider } from "../src/scraperService.js";
+import type { BrowserSession } from "../src/browserSession.js";
+import { findConnectionId, loadSession, saveSession } from "../src/connectionRepository.js";
 import type { MappedTransaction, UserMappings } from "../src/transactionMapper.js";
 import { getUserMappings, saveNewTransactions } from "../src/transactionRepository.js";
 
@@ -24,8 +26,13 @@ const USAGE = `Usage: npm run scrape:test -- --company <id> [options]
   --company <id>    ${["max", "isracard", "amex", "visaCal", "hapoalim", "leumi", "discount", "mizrahi"].join(", ")}, …
   --since <date>    YYYY-MM-DD, default 30 days ago
   --until <date>    YYYY-MM-DD, default today
-  --user <who>      Firebase uid or Google e-mail; needed for --save (and to use learned categories)
+  --user <who>      Firebase uid or Google e-mail; needed for --save / --save-session (and to use learned categories)
   --save            write new rows to users/{uid}/transactions as drafts (default: dry run)
+  --save-session    store the browser session (trusted-device cookies) on the user's saved
+                    connection to this company, and restore the one already saved before login.
+                    With --show-browser you can complete a one-time code by hand, so the
+                    device the bank just approved is what every later headless sync uses.
+                    Raise SCRAPE_TIMEOUT_MS (ms) if 2 minutes isn't enough to type the code.
   --show-browser    run Chromium with a visible window
   --limit <n>       rows to print per table, default 50`;
 
@@ -36,6 +43,7 @@ const { values: args } = parseArgs({
     until: { type: "string" },
     user: { type: "string" },
     save: { type: "boolean", default: false },
+    "save-session": { type: "boolean", default: false },
     "show-browser": { type: "boolean", default: false },
     limit: { type: "string", default: "50" },
     help: { type: "boolean", short: "h", default: false },
@@ -135,6 +143,7 @@ async function main() {
     fail(`--company must be one of: ${Object.values(CompanyTypes).join(", ")}\n\n${USAGE}`);
   }
   if (args.save && !args.user) fail("--save needs --user <uid|e-mail> to know whose transactions to write.");
+  if (args["save-session"] && !args.user) fail("--save-session needs --user <uid|e-mail> to find the saved connection.");
 
   const since = args.since ? new Date(args.since) : new Date(Date.now() - 30 * 86_400_000);
   if (Number.isNaN(since.getTime()) || since > new Date()) fail("--since must be a past YYYY-MM-DD date.");
@@ -153,12 +162,35 @@ async function main() {
   const missing = missingLoginFields(companyId, credentials);
   if (missing.length) fail(`Missing login fields: ${missing.join(", ")}`);
 
+  // The saved connection whose device state this run restores and refreshes.
+  const connectionId = uid && args["save-session"] ? await findConnectionId(uid, companyId) : undefined;
+  if (args["save-session"] && !connectionId) {
+    fail(`${args.user} has no saved connection to ${companyId}; connect it in the app first (with "remember").`);
+  }
+  const session = connectionId ? await loadSession(uid!, connectionId) : null;
+  if (connectionId) console.log(session ? "Restoring the saved browser session." : "No saved browser session yet.");
+
   console.log(`\nLaunching Chromium${args["show-browser"] ? " (visible)" : " (headless)"} and logging in…`);
   const startedAt = Date.now();
   const mappings: UserMappings = uid ? await getUserMappings(uid) : { expense: [], income: [] };
   let outcome;
+  let sessionSaved = false;
   try {
-    const request = { provider: companyId, credentials, startDate: since, endDate: until, headless: !args["show-browser"] };
+    const request = {
+      provider: companyId,
+      credentials,
+      startDate: since,
+      endDate: until,
+      headless: !args["show-browser"],
+      session: session ?? undefined,
+      profileId: connectionId,
+      onSession: connectionId
+        ? async (s: BrowserSession) => {
+            await saveSession(uid!, connectionId, s);
+            sessionSaved = true;
+          }
+        : undefined,
+    };
     credentials = undefined;
     outcome = await scrapeProvider(request, mappings);
   } catch (err) {
@@ -170,6 +202,9 @@ async function main() {
     throw err;
   }
   console.log(`✔ Scraped in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+  if (connectionId) {
+    console.log(sessionSaved ? "✔ Browser session saved on the connection" : "  (no browser session captured)");
+  }
   for (const a of outcome.accounts) {
     console.log(`  account ${a.accountNumber}${a.balance != null ? `: balance ${a.balance}` : ""}`);
   }
