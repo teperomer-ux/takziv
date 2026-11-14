@@ -10,7 +10,7 @@ import {
 } from "israeli-bank-scrapers";
 import { ApiError, type ApiErrorCode } from "./errors.js";
 import { exportBrowserSession, restoreBrowserSession, type BrowserSession } from "./browserSession.js";
-import { SCRAPE_TIMEOUT_MS } from "./syncSupport.js";
+import { NAVIGATION_TIMEOUT_MS, SCRAPE_TIMEOUT_MS } from "./syncSupport.js";
 
 export type ScrapedAccount = NonNullable<ScraperScrapingResult["accounts"]>[number];
 
@@ -87,7 +87,7 @@ export function scraperError(errorType: string | undefined, message: string, cre
 const LOGIN_ERROR_PROBES: Partial<Record<CompanyTypes, (page: Page) => Promise<string | null>>> = {
   // Cal shows "wrong username or password" inside its login iframe without
   // navigating. The scraper's postAction waits for a navigation, times out
-  // after 60s and reports GENERIC; its own invalid-password check (same
+  // after NAVIGATION_TIMEOUT_MS and reports GENERIC; its own invalid-password check (same
   // frame, selector and text as here) never runs.
   visaCal: async (page) => {
     for (const frame of page.frames()) {
@@ -147,7 +147,9 @@ export async function runScrape(
       combineInstallments: false,
       browser,
       skipCloseBrowser: true,
-      defaultTimeout: 60_000,
+      // Per page navigation / wait. Bank SPAs (Cal in particular) can take over
+      // 60s to settle when reached from a cloud IP; SCRAPE_TIMEOUT_MS caps the whole run.
+      defaultTimeout: NAVIGATION_TIMEOUT_MS,
       preparePage: async (p) => {
         page = p;
         // Before the first navigation, so the bank's login page already sees

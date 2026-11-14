@@ -40,7 +40,7 @@ NETLIFY_ORIGIN="${NETLIFY_ORIGIN%/}"  # CORS matches exactly; "https://x.netlify
   { echo "✖ NETLIFY_ORIGIN must start with https:// (got $NETLIFY_ORIGIN)" >&2; exit 1; }
 ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com${NETLIFY_ORIGIN:+,$NETLIFY_ORIGIN}}"
 # One request can hold a Chromium instance (~300-500MB RAM) for up to the
-# 120s scrape timeout; MEMORY / CPU / MAX_CONCURRENT_SCRAPES are sized together.
+# 180s scrape timeout; MEMORY / CPU / MAX_CONCURRENT_SCRAPES are sized together.
 MEMORY="${MEMORY:-2Gi}"
 CPU="${CPU:-2}"
 TIMEOUT="${TIMEOUT:-300}"

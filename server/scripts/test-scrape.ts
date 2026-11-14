@@ -32,7 +32,7 @@ const USAGE = `Usage: npm run scrape:test -- --company <id> [options]
                     connection to this company, and restore the one already saved before login.
                     With --show-browser you can complete a one-time code by hand, so the
                     device the bank just approved is what every later headless sync uses.
-                    Raise SCRAPE_TIMEOUT_MS (ms) if 2 minutes isn't enough to type the code.
+                    Raise SCRAPE_TIMEOUT_MS (ms) if 3 minutes isn't enough to type the code.
   --show-browser    run Chromium with a visible window
   --limit <n>       rows to print per table, default 50`;
 

@@ -38,5 +38,6 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 const server = app.listen(PORT, () => {
   console.info(`takziv-server listening on :${PORT}`);
 });
-// Must exceed the 120s scrape timeout so the connection outlives the scrape.
-server.requestTimeout = 180_000;
+// Must exceed the 180s scrape timeout (SCRAPE_TIMEOUT_MS) so the connection
+// outlives the scrape. Cloud Run's own --timeout (deploy-api.sh) is 300s.
+server.requestTimeout = 240_000;

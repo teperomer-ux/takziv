@@ -36,7 +36,8 @@ TIME_ZONE="${TIME_ZONE:-Asia/Jerusalem}"
 MAX_CONCURRENT_SCRAPES="${MAX_CONCURRENT_SCRAPES:-2}"
 JOB_MEMORY="${JOB_MEMORY:-2Gi}"
 JOB_CPU="${JOB_CPU:-2}"
-# Each scrape times out at 120s; 30 min covers ~30 due connections at 2 in parallel.
+# Each scrape times out at 180s; 30 min covers ~20 due connections at 2 in parallel
+# even if every one of them hits the timeout.
 JOB_TIMEOUT="${JOB_TIMEOUT:-30m}"
 
 SYNC_SA="takziv-sync@${PROJECT_ID}.iam.gserviceaccount.com"

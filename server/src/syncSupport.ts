@@ -9,7 +9,10 @@ export const MAX_CONCURRENT_SCRAPES = Math.max(1, Number(process.env.MAX_CONCURR
  * e.g. for a visible-browser run where the user completes a one-time code by
  * hand; never below 30s.
  */
-export const SCRAPE_TIMEOUT_MS = Math.max(30_000, Number(process.env.SCRAPE_TIMEOUT_MS) || 120_000);
+export const SCRAPE_TIMEOUT_MS = Math.max(30_000, Number(process.env.SCRAPE_TIMEOUT_MS) || 180_000);
+
+/** How long a single page navigation or wait inside a scrape may take (Puppeteer's default timeout). */
+export const NAVIGATION_TIMEOUT_MS = 100_000;
 
 /** A saved connection is due for a scheduled sync once its last sync is this old. */
 export const SYNC_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
