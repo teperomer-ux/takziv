@@ -85,8 +85,8 @@ type Phase =
   | { name: "form" }
   /** One-off sync: logging in and fetching, 30-60s. */
   | { name: "loading" }
-  /** Saving a connection: no bank login yet, well under a second. */
-  | { name: "saving" }
+  /** Connecting: saved, waiting for the bank to accept the login (stage 1). */
+  | { name: "verifying" }
   | { name: "success"; result: BankSyncResult }
   | { name: "error"; message: string };
 
@@ -107,20 +107,20 @@ export default function BankSyncModal({ onClose }: Props) {
   const [elapsed, setElapsed] = useState(0);
 
   const institution = findInstitution(companyId) ?? INSTITUTIONS[0];
-  const loading = phase.name === "loading" || phase.name === "saving";
+  const loading = phase.name === "loading" || phase.name === "verifying";
   const bounds = startDateBounds();
   const canSubmit =
     institution.fields.every((f) => (values[f] ?? "").trim().length > 0) &&
     startDate >= bounds.min &&
     startDate <= bounds.max;
 
-  // Seconds counter shown under the one-off sync spinner.
+  // Seconds counter shown under the spinners.
   useEffect(() => {
-    if (phase.name !== "loading") return;
+    if (!loading) return;
     setElapsed(0);
     const t = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(t);
-  }, [phase.name]);
+  }, [loading]);
 
   // Escape closes the modal, except mid-login (saved-connection syncs keep
   // running in the background, so they don't block closing).
@@ -152,15 +152,14 @@ export default function BankSyncModal({ onClose }: Props) {
     for (const f of institution.fields) credentials[f] = (values[f] ?? "").trim();
     // Credentials live only in this call from here on — wipe them from state.
     setValues({});
-    setPhase(remember ? { name: "saving" } : { name: "loading" });
+    setPhase(remember ? { name: "verifying" } : { name: "loading" });
 
     try {
       if (remember) {
-        // Returns once the connection is stored; the bank login runs in the
-        // background and the card below follows it live.
+        // Resolves once the bank accepts the login; the same session then
+        // fetches the transactions in the background (a notice reports it).
         await connect(companyId, credentials, startDate);
-        setPhase({ name: "form" });
-        setView("list");
+        onClose();
         return;
       }
       const result = await syncBankTransactions(companyId, credentials, startDate);
@@ -254,11 +253,17 @@ export default function BankSyncModal({ onClose }: Props) {
           {/* ══ Connect / one-off sync form ══════════════════════════ */}
           {currentView === "form" && (
             <>
-              {/* ── Saving a connection (fast) ──────────────────────── */}
-              {phase.name === "saving" && (
+              {/* ── Connecting: waiting for the bank to accept the login ─ */}
+              {phase.name === "verifying" && (
                 <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
-                  <Loader2 className="h-8 w-8 animate-spin text-teal-600 mb-3" aria-hidden="true" />
-                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">שומרים את החיבור ל{institution.label}…</p>
+                  <Loader2 className="h-10 w-10 animate-spin text-teal-600 mb-4" aria-hidden="true" />
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">מאמת פרטי התחברות מול הבנק...</p>
+                  <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                    {institution.label} · בדרך כלל 10–40 שניות.
+                    <br />
+                    מיד כשהבנק יאשר, החלון ייסגר ומשיכת העסקאות תמשיך ברקע.
+                  </p>
+                  <p className="text-xs text-slate-400 mt-3 tabular-nums" dir="ltr">{elapsed}s</p>
                 </div>
               )}
 
@@ -406,7 +411,7 @@ export default function BankSyncModal({ onClose }: Props) {
                       <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
                     </svg>
                     {remember
-                      ? "פרטי ההתחברות נשמרים מוצפנים בשרת הסנכרון ולעולם אינם נשלחים חזרה לדפדפן. ההתחברות לבנק ממשיכה ברקע; אם הבנק ידחה אותה, החיבור יסומן לעדכון ולא ינוסה שוב אוטומטית."
+                      ? "פרטי ההתחברות נשמרים מוצפנים בשרת הסנכרון ולעולם אינם נשלחים חזרה לדפדפן. אם הבנק ידחה את ההתחברות, תוצג הודעה כאן והחיבור לא ינוסה שוב אוטומטית."
                       : "פרטי ההתחברות נשלחים בחיבור מוצפן, משמשים לסנכרון הזה בלבד ואינם נשמרים."}
                   </p>
 
@@ -496,6 +501,7 @@ function ConnectionCard({
   const institution = findInstitution(connection.companyId);
   const needsAttention = connection.status === "needs_attention";
   const state = connectionState(connection, syncing);
+  const inProgress = state === "verifying" || state === "syncing";
   const stateMeta = CONNECTION_STATE_LABELS[state];
   // session_expired keeps the stored login: the user can retry without typing it again.
   const canRetry = state === "session_expired";
@@ -503,7 +509,7 @@ function ConnectionCard({
   const dotClass =
     state === "active"
       ? "bg-emerald-500"
-      : state === "syncing"
+      : inProgress
         ? "bg-teal-500 animate-pulse"
         : state === "unstable"
           ? "bg-rose-500"
@@ -511,7 +517,7 @@ function ConnectionCard({
   const stateClass =
     state === "active"
       ? "text-emerald-700 dark:text-emerald-400"
-      : state === "syncing"
+      : inProgress
         ? "text-teal-700 dark:text-teal-400 font-semibold"
         : state === "unstable"
           ? "text-rose-600 dark:text-rose-400"
@@ -539,13 +545,13 @@ function ConnectionCard({
             {institution?.label ?? connection.companyId}{" "}
             <span className="text-xs font-normal text-slate-400 tabular-nums" dir="ltr">{connection.maskedLogin}</span>
           </p>
-          <p className="flex items-center gap-1.5 text-xs mt-0.5" role={state === "syncing" ? "status" : undefined} aria-live="polite">
-            {state === "syncing" ? (
+          <p className="flex items-center gap-1.5 text-xs mt-0.5" role={inProgress ? "status" : undefined} aria-live="polite">
+            {inProgress ? (
               <Loader2 className="h-3 w-3 shrink-0 animate-spin text-teal-600" aria-hidden="true" />
             ) : (
               <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`} />
             )}
-            <span className={stateClass}>{state === "syncing" ? stateMeta.label : <>סטטוס: {stateMeta.label}</>}</span>
+            <span className={stateClass}>{inProgress ? stateMeta.label : <>סטטוס: {stateMeta.label}</>}</span>
           </p>
           <p className="text-[11px] text-slate-400 mt-0.5">
             {connection.lastSyncAt ? (
@@ -634,7 +640,7 @@ function ConnectionCard({
           {attentionReason(connection.lastErrorCode)}
         </p>
       )}
-      {(state === "syncing" || (state === "unverified" && !connection.lastErrorCode)) && (
+      {(state === "verifying" || state === "syncing" || (state === "unverified" && !connection.lastErrorCode)) && (
         <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">{stateMeta.hint}</p>
       )}
       {lastFailed && (

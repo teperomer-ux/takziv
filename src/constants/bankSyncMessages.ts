@@ -2,9 +2,13 @@ import type { BankSyncErrorCode, ConnectionState } from "../services/bankSyncSer
 
 /** Status label and explanation per connection state (see connectionState). */
 export const CONNECTION_STATE_LABELS: Record<ConnectionState, { label: string; hint: string }> = {
+  verifying: {
+    label: "מאמת פרטי התחברות מול הבנק...",
+    hint: "ההתחברות לבנק נמשכת בדרך כלל 10–40 שניות.",
+  },
   syncing: {
-    label: "מסנכרן נתונים ברקע...",
-    hint: "החיבור נשמר. ההתחברות לבנק ומשיכת העסקאות נמשכות בדרך כלל 30–60 שניות — אפשר לסגור את החלון ולהמשיך לעבוד.",
+    label: "התחברת בהצלחה! מושך נתונים ברקע...",
+    hint: "הבנק אישר את פרטי ההתחברות. משיכת העסקאות ממשיכה ברקע — אפשר להמשיך לעבוד.",
   },
   unverified: {
     label: "הסנכרון הראשון לא הושלם",

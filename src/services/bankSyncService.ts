@@ -47,6 +47,12 @@ export interface BankConnection {
   status: "syncing" | "active" | "needs_attention";
   /** A login to this connection is running right now (on any device / the scheduled job). */
   syncInProgress: boolean;
+  /**
+   * The bank accepted the saved credentials. False right after connectAccount;
+   * the first sync sets it the moment the login gets through, before it
+   * fetches the transactions.
+   */
+  loginVerified: boolean;
   /** e.g. "•••789" */
   maskedLogin: string;
   lastErrorCode: string | null;
@@ -70,7 +76,8 @@ export function needsBackfill(c: BankConnection): boolean {
 
 /**
  * What the user sees as the connection's state:
- *  - syncing:         just connected; the first sync is running in the background
+ *  - verifying:       just connected; the first sync is logging in (login not confirmed yet)
+ *  - syncing:         just connected, the bank accepted the login; fetching transactions in the background
  *  - unverified:      just connected, but the first sync didn't finish (timeout, busy
  *                     server, tab closed) — the login hasn't been checked yet; sync to retry
  *  - active:          healthy
@@ -81,16 +88,26 @@ export function needsBackfill(c: BankConnection): boolean {
  *
  * `running`: a sync of this connection is in flight (from this tab, or per the server's lease).
  */
-export type ConnectionState = "syncing" | "unverified" | "active" | "unstable" | "session_expired" | "reauth_required";
+export type ConnectionState =
+  | "verifying"
+  | "syncing"
+  | "unverified"
+  | "active"
+  | "unstable"
+  | "session_expired"
+  | "reauth_required";
 
-export function connectionState(c: Pick<BankConnection, "status" | "lastErrorCode">, running = false): ConnectionState {
+export function connectionState(
+  c: Pick<BankConnection, "status" | "lastErrorCode" | "loginVerified">,
+  running = false,
+): ConnectionState {
   if (c.status === "needs_attention") return c.lastErrorCode === "BANK_OTP_REQUIRED" ? "session_expired" : "reauth_required";
-  if (c.status === "syncing") return running ? "syncing" : "unverified";
+  if (c.status === "syncing") return !running ? "unverified" : c.loginVerified ? "syncing" : "verifying";
   return c.lastErrorCode ? "unstable" : "active";
 }
 
 /** Mirrors the server: a session_expired connection syncs again with its stored login. */
-export function canRetryWithoutNewCredentials(c: Pick<BankConnection, "status" | "lastErrorCode">): boolean {
+export function canRetryWithoutNewCredentials(c: Pick<BankConnection, "status" | "lastErrorCode" | "loginVerified">): boolean {
   return connectionState(c) === "session_expired";
 }
 
@@ -178,6 +195,7 @@ function fromDoc(id: string, data: DocumentData): BankConnection {
     companyId: data.companyId,
     status: data.status === "syncing" || data.status === "needs_attention" ? data.status : "active",
     syncInProgress: data.syncLockUntil instanceof Timestamp && data.syncLockUntil.toMillis() > Date.now(),
+    loginVerified: typeof data.loginVerified === "boolean" ? data.loginVerified : data.status !== "syncing" && data.status !== "needs_attention",
     maskedLogin: data.maskedLogin ?? "•••",
     lastErrorCode: data.lastErrorCode ?? null,
     lastSyncAt: isoOrNull(data.lastSyncAt),

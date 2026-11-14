@@ -25,3 +25,15 @@ test("syncInProgress follows the sync lease, not the status", () => {
   assert.equal(toConnection("a", { ...base, status: "syncing", syncLockUntil: null }, now).syncInProgress, false);
   assert.equal(toConnection("a", { ...base, status: "active" }, now).syncInProgress, false);
 });
+
+test("loginVerified: new credentials start unverified until the bank accepts them", () => {
+  assert.equal(toConnection("a", { ...base, status: "syncing", loginVerified: false }, now).loginVerified, false);
+  assert.equal(toConnection("a", { ...base, status: "syncing", loginVerified: true }, now).loginVerified, true);
+});
+
+test("loginVerified: docs saved before the field existed count as verified only if active", () => {
+  assert.equal(toConnection("a", { ...base, status: "active" }, now).loginVerified, true);
+  assert.equal(toConnection("a", { ...base }, now).loginVerified, true);
+  assert.equal(toConnection("a", { ...base, status: "needs_attention" }, now).loginVerified, false);
+  assert.equal(toConnection("a", { ...base, status: "syncing" }, now).loginVerified, false);
+});

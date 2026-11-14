@@ -36,6 +36,12 @@ export interface RunScrapeOptions {
    * granted this device isn't lost with the browser.
    */
   onSession?: (session: BrowserSession) => void | Promise<void>;
+  /**
+   * Called once, the moment the bank accepts the login (the scraper's
+   * LOGIN_SUCCESS), while the same browser goes on to fetch the transactions.
+   * Not awaited: it must not slow the scrape, and its failure doesn't fail it.
+   */
+  onLoginSuccess?: () => void | Promise<void>;
   /** Names the on-disk profile under SCRAPER_USER_DATA_DIR; without it the browser is profile-less. */
   profileId?: string;
 }
@@ -124,7 +130,7 @@ export async function runScrape(
   companyId: CompanyTypes,
   credentials: Record<string, string>,
   startDate: Date,
-  { headless = true, session, onSession, profileId }: RunScrapeOptions = {},
+  { headless = true, session, onSession, onLoginSuccess, profileId }: RunScrapeOptions = {},
 ): Promise<ScrapedAccount[]> {
   const userDataDir = profileDir(profileId);
   if (userDataDir) mkdirSync(userDataDir, { recursive: true });
@@ -162,7 +168,11 @@ export async function runScrape(
       },
     });
     scraper.onProgress((_, { type }) => {
-      if (type === "LOGIN_SUCCESS") loggedIn = true;
+      if (type !== "LOGIN_SUCCESS" || loggedIn) return;
+      loggedIn = true;
+      Promise.resolve()
+        .then(onLoginSuccess)
+        .catch((err) => console.warn(JSON.stringify({ event: "login_success_hook_failed", companyId, error: String(err) })));
     });
 
     const scrape = scraper.scrape(credentials as ScraperCredentials);

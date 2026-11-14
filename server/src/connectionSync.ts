@@ -7,6 +7,7 @@ import {
   findConnectionId,
   getConnection,
   loadCredentials,
+  markLoginVerified,
   releaseSyncLease,
   saveConnection,
   saveSession,
@@ -201,10 +202,19 @@ export async function syncSavedConnection(
             saveSession(uid, connectionId, session).catch((e) =>
               console.error(JSON.stringify({ event: "session_save_failed", connectionId, error: String(e) })),
             ),
+          // Lets the connect dialog close as soon as the login is confirmed,
+          // while this same browser session goes on fetching (no second login).
+          ...(!connection.loginVerified && {
+            onLoginSuccess: () =>
+              markLoginVerified(uid, connectionId).catch((e) =>
+                console.error(JSON.stringify({ event: "login_verified_save_failed", connectionId, error: String(e) })),
+              ),
+          }),
         });
         await updateConnectionStatus(uid, connectionId, {
           status: "active",
           lastErrorCode: null,
+          loginVerified: true,
           synced: true,
           ...(fetchedFrom && { syncedFrom: fetchedFrom }),
         });

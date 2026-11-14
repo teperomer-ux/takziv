@@ -61,6 +61,13 @@ export interface BankConnection {
   status: ConnectionStatus;
   /** True while some sync holds the connection's lease, i.e. a login is running right now. */
   syncInProgress: boolean;
+  /**
+   * The bank accepted the credentials currently saved. Reset to false when new
+   * credentials are saved; set by the first sync the moment the login gets
+   * through — before the transactions are fetched — so the client can stop
+   * waiting on the login and let the fetch finish in the background.
+   */
+  loginVerified: boolean;
   /** e.g. "•••789" — the last characters of the login identifier, never a secret field. */
   maskedLogin: string;
   /** API error code of the last failed sync, cleared on success. */
@@ -116,12 +123,15 @@ function connectionsCol(uid: string) {
 }
 
 export function toConnection(id: string, data: FirebaseFirestore.DocumentData, now = Date.now()): BankConnection {
+  // Docs written before "syncing" existed have only the two older values.
+  const status: ConnectionStatus = STATUSES.has(data.status) ? data.status : "active";
   return {
     id,
     companyId: data.companyId,
-    // Docs written before "syncing" existed have only the two older values.
-    status: STATUSES.has(data.status) ? data.status : "active",
+    status,
     syncInProgress: ((data.syncLockUntil as Timestamp | null | undefined)?.toMillis() ?? 0) > now,
+    // Absent on docs saved before this field existed: those logged in fine unless flagged.
+    loginVerified: typeof data.loginVerified === "boolean" ? data.loginVerified : status === "active",
     maskedLogin: data.maskedLogin ?? "•••",
     lastErrorCode: data.lastErrorCode ?? null,
     lastSyncAt: (data.lastSyncAt as Timestamp | null)?.toDate() ?? null,
@@ -173,6 +183,7 @@ export async function saveConnection(
     {
       companyId,
       status: "syncing",
+      loginVerified: false,
       maskedLogin: maskLogin(companyId, credentials),
       lastErrorCode: null,
       ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null, sessionSavedAt: null }),
@@ -246,12 +257,23 @@ export async function saveSession(uid: string, connectionId: string, session: Br
 export async function updateConnectionStatus(
   uid: string,
   connectionId: string,
-  update: { status?: ConnectionStatus; lastErrorCode: string | null; synced?: boolean; syncedFrom?: string },
+  update: {
+    status?: ConnectionStatus;
+    lastErrorCode: string | null;
+    synced?: boolean;
+    syncedFrom?: string;
+    loginVerified?: boolean;
+  },
 ) {
   const { synced, ...fields } = update;
   await connectionsCol(uid)
     .doc(connectionId)
     .update({ ...fields, ...(synced && { lastSyncAt: FieldValue.serverTimestamp() }) });
+}
+
+/** Records that the bank just accepted this connection's saved login (see BankConnection.loginVerified). */
+export async function markLoginVerified(uid: string, connectionId: string) {
+  await connectionsCol(uid).doc(connectionId).update({ loginVerified: true });
 }
 
 /** Sets the date future syncs fetch from. A date before `syncedFrom` makes the next sync backfill to it. */
