@@ -13,6 +13,12 @@ COPY server/src ./src
 # The shared modules listed in server/tsconfig.json; only those are compiled.
 COPY src/types /app/src/types
 COPY src/utils /app/src/utils
+# With "module": "NodeNext", tsc picks ESM vs CommonJS per file from the
+# nearest package.json "type". The root package.json (which says "module")
+# isn't in the image, so without this the shared src/ files compile to
+# CommonJS, and the ESM server then fails at startup with "does not provide
+# an export named …".
+RUN echo '{"type":"module"}' > /app/package.json
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
