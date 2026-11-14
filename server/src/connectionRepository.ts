@@ -40,15 +40,12 @@ import { SCRAPE_TIMEOUT_MS } from "./syncSupport.js";
 const SECRETS = "bankSecrets";
 
 /**
- *  syncing          credentials saved by POST /api/connections but not yet
- *                   confirmed by a login; the first sync (POST …/:id/sync,
- *                   fired by the client right after) settles it. If that sync
- *                   fails for a reason that isn't the login's fault (timeout,
- *                   busy server) it stays here with lastErrorCode set. The
- *                   scheduled job never picks it up: only a login the user
- *                   started may try unverified credentials.
- *  active           the saved login worked
- *  needs_attention  the bank rejected the login / wants OTP or a password change
+ *  syncing          the bank accepted the login (connections are only ever
+ *                   written after that — see connectAndSync), and the first
+ *                   fetch of transactions is running or didn't complete
+ *                   (lastErrorCode then says why); the user retries it.
+ *  active           synced successfully at least once
+ *  needs_attention  the bank rejected the saved login / wants OTP or a password change
  */
 export type ConnectionStatus = "syncing" | "active" | "needs_attention";
 type KeySource = "kms" | "local";
@@ -62,10 +59,9 @@ export interface BankConnection {
   /** True while some sync holds the connection's lease, i.e. a login is running right now. */
   syncInProgress: boolean;
   /**
-   * The bank accepted the credentials currently saved. Reset to false when new
-   * credentials are saved; set by the first sync the moment the login gets
-   * through — before the transactions are fetched — so the client can stop
-   * waiting on the login and let the fetch finish in the background.
+   * The bank accepted these credentials at least once. Every connection
+   * written since connectAndSync is verified; false only on leftovers saved
+   * unverified by earlier versions, which are hidden and never synced.
    */
   loginVerified: boolean;
   /** e.g. "•••789" — the last characters of the login identifier, never a secret field. */
@@ -130,8 +126,8 @@ export function toConnection(id: string, data: FirebaseFirestore.DocumentData, n
     companyId: data.companyId,
     status,
     syncInProgress: ((data.syncLockUntil as Timestamp | null | undefined)?.toMillis() ?? 0) > now,
-    // Absent on docs saved before this field existed: those logged in fine unless flagged.
-    loginVerified: typeof data.loginVerified === "boolean" ? data.loginVerified : status === "active",
+    // Absent on docs saved before this field existed: verified if they ever synced.
+    loginVerified: typeof data.loginVerified === "boolean" ? data.loginVerified : status === "active" || !!data.lastSyncAt,
     maskedLogin: data.maskedLogin ?? "•••",
     lastErrorCode: data.lastErrorCode ?? null,
     lastSyncAt: (data.lastSyncAt as Timestamp | null)?.toDate() ?? null,
@@ -141,9 +137,15 @@ export function toConnection(id: string, data: FirebaseFirestore.DocumentData, n
   };
 }
 
+/** The user's connected accounts: only logins the bank has accepted (see isVisibleConnection). */
 export async function listConnections(uid: string): Promise<BankConnection[]> {
   const snapshot = await connectionsCol(uid).get();
-  return snapshot.docs.map((d) => toConnection(d.id, d.data()));
+  return snapshot.docs.map((d) => toConnection(d.id, d.data())).filter(isVisibleConnection);
+}
+
+/** Whether a connection belongs in the user's "connected accounts": its login was verified by the bank. */
+export function isVisibleConnection(c: Pick<BankConnection, "loginVerified">) {
+  return c.loginVerified;
 }
 
 export async function getConnection(uid: string, connectionId: string): Promise<BankConnection> {
@@ -153,21 +155,28 @@ export async function getConnection(uid: string, connectionId: string): Promise<
 }
 
 /**
- * Stores credentials for a provider as status "syncing" (not yet confirmed by
- * a login), updating `connectionId` — the user's existing connection to that
- * provider — when given, else creating one (one saved login per provider).
- * Use saveUnverifiedConnection (connectionSync.ts), which holds the lease.
+ * Stores credentials the bank has JUST accepted (call it from the login-success
+ * hook of a connect, never before), as a verified connection with status
+ * "syncing" while the first fetch runs. Updates `connectionId` — the user's
+ * existing connection to that provider — when given, else creates one (one
+ * saved login per provider). `leaseToken` takes the sync lease on a new
+ * connection so other devices see the fetch in progress; an existing one is
+ * already leased by the caller.
  *
  * Re-saving keeps the connection id — and with it the transactions, start
- * date, sync history and the stored browser session (the device trust) —
- * and clears the previous error.
+ * date, sync history and the stored browser session (the device trust).
  */
-export async function saveConnection(
+export async function saveVerifiedConnection(
   uid: string,
   companyId: CompanyTypes,
   credentials: Record<string, string>,
-  { connectionId: existingId, startDate }: { connectionId?: string; startDate: string },
-): Promise<BankConnection> {
+  {
+    connectionId: existingId,
+    startDate,
+    attemptId,
+    leaseToken,
+  }: { connectionId?: string; startDate: string; attemptId: string; leaseToken?: string },
+): Promise<string> {
   const connectionId = existingId ?? randomUUID();
   const { source, wrapper } = getVault();
   const envelope = await encryptCredentials(wrapper, uid, connectionId, credentials);
@@ -183,16 +192,37 @@ export async function saveConnection(
     {
       companyId,
       status: "syncing",
-      loginVerified: false,
+      loginVerified: true,
+      // Lets the connect dialog that started this attempt recognise this write.
+      connectAttemptId: attemptId,
       maskedLogin: maskLogin(companyId, credentials),
       lastErrorCode: null,
       ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null, sessionSavedAt: null }),
+      ...(leaseToken && {
+        syncLockUntil: Timestamp.fromMillis(Date.now() + SYNC_LEASE_TTL_MS),
+        syncLeaseToken: leaseToken,
+      }),
       startDate,
     },
     { merge: true },
   );
   await batch.commit();
-  return getConnection(uid, connectionId);
+  return connectionId;
+}
+
+/**
+ * Removes a connection left unverified by an earlier version (saved before its
+ * login was checked), together with its secret if it has one.
+ */
+export async function discardUnverifiedConnection(uid: string, connectionId: string) {
+  const ref = connectionsCol(uid).doc(connectionId);
+  const snap = await ref.get();
+  if (!snap.exists || toConnection(snap.id, snap.data()!).loginVerified) return;
+  const batch = adminDb.batch();
+  batch.delete(ref);
+  const secret = await adminDb.collection(SECRETS).doc(connectionId).get();
+  if (secret.exists && (secret.data() as SecretDoc).uid === uid) batch.delete(secret.ref);
+  await batch.commit();
 }
 
 /**
@@ -269,11 +299,6 @@ export async function updateConnectionStatus(
   await connectionsCol(uid)
     .doc(connectionId)
     .update({ ...fields, ...(synced && { lastSyncAt: FieldValue.serverTimestamp() }) });
-}
-
-/** Records that the bank just accepted this connection's saved login (see BankConnection.loginVerified). */
-export async function markLoginVerified(uid: string, connectionId: string) {
-  await connectionsCol(uid).doc(connectionId).update({ loginVerified: true });
 }
 
 /** Sets the date future syncs fetch from. A date before `syncedFrom` makes the next sync backfill to it. */

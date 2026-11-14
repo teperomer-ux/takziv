@@ -12,7 +12,13 @@ import {
 import { useBankSync } from "../hooks/useBankSync";
 import { useSettings } from "../hooks/useSettings";
 import { INSTITUTIONS, findInstitution, type LoginField } from "../constants/institutions";
-import { CONNECTION_STATE_LABELS, ERROR_MESSAGES, attentionReason, syncErrorMessage } from "../constants/bankSyncMessages";
+import {
+  CONNECTION_STATE_LABELS,
+  ERROR_MESSAGES,
+  attentionReason,
+  loginErrorMessage,
+  syncErrorMessage,
+} from "../constants/bankSyncMessages";
 import type { TransactionSource } from "../types";
 import { formatDate } from "../utils/formatDate";
 
@@ -85,8 +91,10 @@ type Phase =
   | { name: "form" }
   /** One-off sync: logging in and fetching, 30-60s. */
   | { name: "loading" }
-  /** Connecting: saved, waiting for the bank to accept the login (stage 1). */
+  /** Connecting, stage 1: waiting for the bank to accept the login. Nothing is saved yet. */
   | { name: "verifying" }
+  /** The bank accepted the login: shown briefly, then the dialog closes while the fetch goes on. */
+  | { name: "verified" }
   | { name: "success"; result: BankSyncResult }
   | { name: "error"; message: string };
 
@@ -113,6 +121,14 @@ export default function BankSyncModal({ onClose }: Props) {
     institution.fields.every((f) => (values[f] ?? "").trim().length > 0) &&
     startDate >= bounds.min &&
     startDate <= bounds.max;
+
+  // "Login succeeded" stays up for 2 seconds, then the dialog closes; the
+  // account now appears under the connected accounts, fetching in the background.
+  useEffect(() => {
+    if (phase.name !== "verified") return;
+    const t = setTimeout(onClose, 2000);
+    return () => clearTimeout(t);
+  }, [phase.name, onClose]);
 
   // Seconds counter shown under the spinners.
   useEffect(() => {
@@ -153,21 +169,26 @@ export default function BankSyncModal({ onClose }: Props) {
     // Credentials live only in this call from here on — wipe them from state.
     setValues({});
     setPhase(remember ? { name: "verifying" } : { name: "loading" });
+    // Stay on the form even once the new account shows up in the list.
+    setView("form");
 
     try {
       if (remember) {
         // Resolves once the bank accepts the login; the same session then
         // fetches the transactions in the background (a notice reports it).
         await connect(companyId, credentials, startDate);
-        onClose();
+        setPhase({ name: "verified" });
         return;
       }
       const result = await syncBankTransactions(companyId, credentials, startDate);
       setPhase({ name: "success", result });
     } catch (err) {
+      const code = err instanceof BankSyncError ? err.code : "INTERNAL_ERROR";
+      const details = err instanceof BankSyncError ? err.details : undefined;
       setPhase({
         name: "error",
-        message: err instanceof BankSyncError ? syncErrorMessage(err.code, err.details) : ERROR_MESSAGES.INTERNAL_ERROR,
+        // A failed connect saved nothing: say plainly that the login failed, and why.
+        message: remember ? loginErrorMessage(code, details) : syncErrorMessage(code, details),
       });
     }
   }
@@ -257,13 +278,24 @@ export default function BankSyncModal({ onClose }: Props) {
               {phase.name === "verifying" && (
                 <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
                   <Loader2 className="h-10 w-10 animate-spin text-teal-600 mb-4" aria-hidden="true" />
-                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">מאמת פרטי התחברות מול הבנק...</p>
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">מאמת פרטי התחברות...</p>
                   <p className="text-xs text-slate-400 mt-2 leading-relaxed">
                     {institution.label} · בדרך כלל 10–40 שניות.
                     <br />
-                    מיד כשהבנק יאשר, החלון ייסגר ומשיכת העסקאות תמשיך ברקע.
+                    החשבון יתווסף רק לאחר שהבנק יאשר את ההתחברות.
                   </p>
                   <p className="text-xs text-slate-400 mt-3 tabular-nums" dir="ltr">{elapsed}s</p>
+                </div>
+              )}
+
+              {/* ── Login accepted (2s, then the dialog closes) ─────── */}
+              {phase.name === "verified" && (
+                <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
+                  <div className="mx-auto mb-4 h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center">
+                    <Check className="h-6 w-6 text-emerald-600" />
+                  </div>
+                  <p className="text-base font-bold text-slate-800 dark:text-white">התחברות בוצעה בהצלחה!</p>
+                  <p className="text-xs text-slate-400 mt-2">{institution.label} נוסף לחשבונות המחוברים · מושך נתונים ברקע...</p>
                 </div>
               )}
 
@@ -501,11 +533,11 @@ function ConnectionCard({
   const institution = findInstitution(connection.companyId);
   const needsAttention = connection.status === "needs_attention";
   const state = connectionState(connection, syncing);
-  const inProgress = state === "verifying" || state === "syncing";
+  const inProgress = state === "syncing";
   const stateMeta = CONNECTION_STATE_LABELS[state];
   // session_expired keeps the stored login: the user can retry without typing it again.
   const canRetry = state === "session_expired";
-  const lastFailed = state === "unstable" || (state === "unverified" && !!connection.lastErrorCode);
+  const lastFailed = state === "unstable" || (state === "sync_incomplete" && !!connection.lastErrorCode);
   const dotClass =
     state === "active"
       ? "bg-emerald-500"
@@ -640,7 +672,7 @@ function ConnectionCard({
           {attentionReason(connection.lastErrorCode)}
         </p>
       )}
-      {(state === "verifying" || state === "syncing" || (state === "unverified" && !connection.lastErrorCode)) && (
+      {(state === "syncing" || (state === "sync_incomplete" && !connection.lastErrorCode)) && (
         <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">{stateMeta.hint}</p>
       )}
       {lastFailed && (

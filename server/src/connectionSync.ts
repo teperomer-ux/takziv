@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { CompanyTypes } from "israeli-bank-scrapers";
 import { ApiError } from "./errors.js";
 import { syncProvider, type SyncOutcome } from "./scraperService.js";
@@ -6,11 +7,12 @@ import {
   acquireSyncLease,
   findConnectionId,
   getConnection,
+  discardUnverifiedConnection,
   loadCredentials,
-  markLoginVerified,
+  loadSession,
   releaseSyncLease,
-  saveConnection,
   saveSession,
+  saveVerifiedConnection,
   updateConnectionStatus,
   type BankConnection,
 } from "./connectionRepository.js";
@@ -141,10 +143,9 @@ async function withBrowserSlot<T>(fn: () => Promise<T>) {
  *
  * Never retries a login the bank already rejected (status needs_attention
  * over the credentials themselves) — that's how bank accounts get locked —
- * and flags the connection when the bank rejects it now. This is also the
- * first sync of a connection just saved as "syncing": success makes it
- * active; a rejected login flags it; any other failure leaves it "syncing"
- * with lastErrorCode set, for the user to retry. A connection
+ * and flags the connection when the bank rejects it now. A connection whose
+ * first fetch didn't complete ("syncing", login already verified) is retried
+ * here too; success makes it active. A connection
  * flagged only for a one-time code may be retried (see
  * canRetryWithoutNewCredentials); the scheduled job never does, as it only
  * picks active connections.
@@ -161,6 +162,8 @@ export async function syncSavedConnection(
     // The lease is checked first, before any status read, so the status can't
     // change between the check and the login: only lease holders write it.
     withLease(uid, connectionId, async (connection) => {
+      // A leftover saved unverified by an earlier version: hidden, never logged in with.
+      if (!connection.loginVerified) throw new ApiError("CONNECTION_NOT_FOUND");
       if (connection.status === "needs_attention" && !canRetryWithoutNewCredentials(connection)) {
         throw new ApiError("CONNECTION_NEEDS_ATTENTION", { lastErrorCode: connection.lastErrorCode });
       }
@@ -202,14 +205,6 @@ export async function syncSavedConnection(
             saveSession(uid, connectionId, session).catch((e) =>
               console.error(JSON.stringify({ event: "session_save_failed", connectionId, error: String(e) })),
             ),
-          // Lets the connect dialog close as soon as the login is confirmed,
-          // while this same browser session goes on fetching (no second login).
-          ...(!connection.loginVerified && {
-            onLoginSuccess: () =>
-              markLoginVerified(uid, connectionId).catch((e) =>
-                console.error(JSON.stringify({ event: "login_verified_save_failed", connectionId, error: String(e) })),
-              ),
-          }),
         });
         await updateConnectionStatus(uid, connectionId, {
           status: "active",
@@ -236,28 +231,105 @@ export async function syncSavedConnection(
 }
 
 /**
- * The fast half of connecting (POST /api/connections): encrypts and stores
- * the credentials as status "syncing" without logging in, so the request
- * returns in well under a second. The client then calls
- * syncSavedConnection (POST …/:id/sync) as its own request — on Cloud Run
- * the CPU is only guaranteed while a request is open, so the 30-60s login
- * must never run after a response has been sent.
+ * Connects (or re-connects) a provider with credentials typed in just now, in
+ * one request and one bank login:
  *
- * Re-connecting a provider updates its existing connection under that
- * connection's lease: new credentials never replace old ones in the middle of
- * a sync, which would otherwise end by marking the unverified login active.
+ *   1. logs in. Nothing is written before the bank accepts the login: a wrong
+ *      password, OTP prompt, blocked account or login timeout leaves no trace
+ *      (and leaves an existing connection's working credentials untouched).
+ *   2. the moment the bank accepts it (the scraper's LOGIN_SUCCESS), stores the
+ *      credentials as a verified connection, status "syncing", tagged with
+ *      `attemptId` so the client's dialog can see the login went through and
+ *      close while this same browser session goes on fetching.
+ *   3. fetches and saves the transactions, then marks the connection active —
+ *      or, if the fetch fails, records lastErrorCode ("first sync incomplete"
+ *      for a new connection; an existing one stays active).
+ *
+ * The request stays open for the whole run: on Cloud Run the CPU is only
+ * guaranteed while a request is in flight.
  */
-export async function saveUnverifiedConnection(
+export async function connectAndSync(
   uid: string,
   companyId: CompanyTypes,
   credentials: Record<string, string>,
-  startDate: string,
-): Promise<BankConnection> {
-  const connectionId = await findConnectionId(uid, companyId);
-  if (!connectionId) return saveConnection(uid, companyId, credentials, { startDate });
-  await withLease(uid, connectionId, () => saveConnection(uid, companyId, credentials, { connectionId, startDate }));
-  // Read again once the lease is released, so syncInProgress is false.
-  return getConnection(uid, connectionId);
+  { startDate, attemptId }: { startDate: string; attemptId: string },
+): Promise<SyncResult> {
+  return withProviderSlot(uid, companyId, async (existingId) => {
+    const existing = existingId ? await getConnection(uid, existingId) : undefined;
+    // A leftover from an earlier version, saved before its login was checked.
+    const reuseId = existing?.loginVerified ? existingId : undefined;
+    let promotion: Promise<string> | undefined;
+    let ownLease: string | undefined;
+    const promote = () =>
+      (promotion ??= (async () => {
+        // An unverified leftover is replaced by this verified login, under its id.
+        const connectionId = existingId;
+        if (!connectionId) ownLease = randomUUID();
+        return saveVerifiedConnection(uid, companyId, credentials, {
+          connectionId,
+          startDate,
+          attemptId,
+          leaseToken: ownLease,
+        });
+      })());
+    const logError = (event: string) => (e: unknown) => console.error(JSON.stringify({ event, companyId, error: String(e) }));
+
+    let connectionId: string | undefined;
+    try {
+      let outcome: SyncOutcome;
+      try {
+        outcome = await syncProvider(uid, {
+          provider: companyId,
+          credentials,
+          startDate: new Date(startDate),
+          session: reuseId ? (await loadSession(uid, reuseId)) ?? undefined : undefined,
+          profileId: reuseId,
+          onLoginSuccess: async () => {
+            connectionId = await promote();
+          },
+          // Called while the browser closes, after a login that got through.
+          onSession: async (session) => {
+            const id = await promotion?.catch(() => undefined);
+            if (id) await saveSession(uid, id, session).catch(logError("session_save_failed"));
+          },
+        });
+      } catch (err) {
+        const apiErr = err instanceof ApiError ? err : new ApiError("INTERNAL_ERROR", { internalMessage: String(err) });
+        if (!promotion) {
+          // Stage 1 failed: the login never got through, so nothing is kept.
+          if (existingId && !reuseId) await discardUnverifiedConnection(uid, existingId).catch(logError("discard_failed"));
+          throw apiErr;
+        }
+        // Stage 2 failed: the login is verified and saved; the fetch didn't complete.
+        connectionId = await promotion.catch((e) => {
+          throw new ApiError("CREDENTIAL_STORE_UNAVAILABLE", { internalMessage: String(e) });
+        });
+        await updateConnectionStatus(uid, connectionId, {
+          ...(existing?.lastSyncAt && { status: "active" }),
+          lastErrorCode: apiErr.code,
+        }).catch(logError("status_update_failed"));
+        throw apiErr;
+      }
+
+      // Scrapers that never report LOGIN_SUCCESS are promoted here, once they succeed.
+      try {
+        connectionId = await promote();
+      } catch (e) {
+        throw new ApiError("CREDENTIAL_STORE_UNAVAILABLE", { internalMessage: String(e) });
+      }
+      const reachesFurther = !existing?.syncedFrom || startDate < existing.syncedFrom;
+      await updateConnectionStatus(uid, connectionId, {
+        status: "active",
+        lastErrorCode: null,
+        loginVerified: true,
+        synced: true,
+        ...(reachesFurther && { syncedFrom: startDate }),
+      });
+      return { connection: { ...(await getConnection(uid, connectionId)), syncInProgress: false }, outcome };
+    } finally {
+      if (ownLease && connectionId) await releaseSyncLease(uid, connectionId, ownLease).catch(logError("lease_release_failed"));
+    }
+  });
 }
 
 /**

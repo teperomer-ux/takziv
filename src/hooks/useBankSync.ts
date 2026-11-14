@@ -20,6 +20,14 @@ const AUTO_SYNC_AFTER_MS = 24 * 60 * 60 * 1000;
 
 type SyncAttempt = { ok: true; result: ConnectionSyncResult } | { ok: false; error: unknown };
 
+function addedText(r: ConnectionSyncResult) {
+  return r.savedCount > 0 ? `נוספו ${r.savedCount.toLocaleString("he-IL")} תנועות חדשות לאישור` : "אין תנועות חדשות";
+}
+
+function errorReason(err: unknown) {
+  return err instanceof BankSyncError ? syncErrorMessage(err.code, err.details) : ERROR_MESSAGES.INTERNAL_ERROR;
+}
+
 export interface SyncNotice {
   kind: "success" | "attention" | "error";
   text: string;
@@ -39,11 +47,11 @@ interface BankSyncContextValue {
   /** Background sync of a saved connection; resolves null on failure (the notice explains). */
   syncNow: (id: string) => Promise<ConnectionSyncResult | null>;
   /**
-   * Saves the connection and starts its first sync (a single bank login).
-   * Resolves as soon as the bank accepts the login — the transactions are
-   * then fetched in the background by that same session, and the outcome
-   * arrives through the live connection list and a notice. Rejects with the
-   * bank's error (BankSyncError) if the save fails or the login is refused.
+   * Connects a provider (a single bank login). Resolves with the connection
+   * as soon as the bank accepts the login — nothing exists before that — and
+   * the same session then fetches the transactions in the background; the
+   * outcome arrives through the live list and a notice. Rejects with the
+   * error (BankSyncError) if the login fails; no connection is created.
    */
   connect: (companyId: string, credentials: Record<string, string>, startDate: string) => Promise<BankConnection>;
   disconnect: (id: string) => Promise<void>;
@@ -74,19 +82,17 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<SyncNotice | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
-  /** Connected in this tab, first sync queued or running. */
-  const [backgroundIds, setBackgroundIds] = useState<string[]>([]);
   const syncingRef = useRef(false);
   const currentSync = useRef<Promise<unknown> | null>(null);
   const autoSyncStarted = useRef(false);
   /** True once the Firestore listener has delivered: from then on it is the source of truth. */
   const liveRef = useRef(false);
   /**
-   * connect() calls waiting for the bank to accept a just-saved login.
-   * `sawUnverified`: a snapshot after the save (loginVerified false) has been
-   * seen, so a later true is this login's — not a stale pre-save snapshot.
+   * connect() calls waiting for the bank to accept their login, by attemptId.
+   * The server writes the connection — tagged with that id — only once the
+   * login got through, so the first snapshot carrying it is the signal.
    */
-  const loginWaiters = useRef(new Map<string, { sawUnverified: boolean; resolve: () => void }>());
+  const attemptWaiters = useRef(new Map<string, (connection: BankConnection) => void>());
   const connectionsRef = useRef(connections);
   connectionsRef.current = connections;
 
@@ -114,10 +120,8 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
         setConnections(list);
         setConnectionsLoaded(true);
         for (const c of list) {
-          const waiter = loginWaiters.current.get(c.id);
-          if (!waiter) continue;
-          if (!c.loginVerified) waiter.sawUnverified = true;
-          else if (waiter.sawUnverified) waiter.resolve();
+          const waiter = c.connectAttemptId ? attemptWaiters.current.get(c.connectAttemptId) : undefined;
+          waiter?.(c);
         }
       },
       (err) => {
@@ -136,116 +140,103 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     setConnections((prev) => [...prev.filter((p) => p.id !== c.id), c]);
 
   /**
-   * Runs one sync of a saved connection and reports it in a notice. Resolves
-   * null if another sync is already running (one bank login at a time: the
-   * server allows one per user anyway, and parallel logins are what get bank
-   * accounts locked), otherwise the outcome.
-   *
-   * `loginConfirmed` is passed only by connect(): until it returns true the
-   * connect dialog is still open and shows a failure itself, so no notice.
+   * Runs `run` in the one-login-at-a-time slot, waiting for it if a sync is
+   * already running: the server allows one per user anyway, and parallel
+   * logins are what get bank accounts locked.
    */
-  const startSync = useCallback(
-    (
-      id: string,
-      { companyId, loginConfirmed }: { companyId?: string; loginConfirmed?: () => boolean } = {},
-    ): Promise<SyncAttempt> | null => {
+  const exclusive = useCallback(async <T,>(run: () => Promise<T>): Promise<T> => {
+    while (syncingRef.current) await currentSync.current;
+    syncingRef.current = true;
+    const p = (async () => {
+      try {
+        return await run();
+      } finally {
+        syncingRef.current = false;
+        currentSync.current = null;
+        setSyncingId(null);
+      }
+    })();
+    currentSync.current = p;
+    return p;
+  }, []);
+
+  const syncNow = useCallback(
+    async (id: string): Promise<ConnectionSyncResult | null> => {
+      // A tap while another sync runs is ignored rather than queued.
       if (syncingRef.current) return null;
-      syncingRef.current = true;
-      setSyncingId(id);
-      const label = institutionLabel(companyId ?? connectionsRef.current.find((c) => c.id === id)?.companyId ?? "");
-      const first = loginConfirmed !== undefined;
-      const run = (async (): Promise<SyncAttempt> => {
+      const label = institutionLabel(connectionsRef.current.find((c) => c.id === id)?.companyId ?? "");
+      return exclusive(async () => {
+        setSyncingId(id);
         try {
           const result = await syncConnection(id);
           replace(result.connection);
-          const added =
-            result.savedCount > 0
-              ? `נוספו ${result.savedCount.toLocaleString("he-IL")} תנועות חדשות לאישור`
-              : "אין תנועות חדשות";
-          setNotice({ kind: "success", text: first ? `${label} חובר בהצלחה — ${added}` : `${label}: ${added}` });
-          return { ok: true, result };
+          setNotice({ kind: "success", text: `${label}: ${addedText(result)}` });
+          return result;
         } catch (err) {
           const code = err instanceof BankSyncError ? err.code : "INTERNAL_ERROR";
           await refresh(); // the server may have flipped the status (a no-op while the live list is on)
-          if (first && !loginConfirmed()) return { ok: false, error: err };
           const lastErrorCode = (err instanceof BankSyncError && (err.details?.lastErrorCode as string)) || code;
           const needsAction =
             code === "CONNECTION_NEEDS_ATTENTION" ||
             ["BANK_INVALID_CREDENTIALS", "BANK_OTP_REQUIRED", "BANK_CHANGE_PASSWORD", "BANK_ACCOUNT_BLOCKED"].includes(code);
           const heading = lastErrorCode === "BANK_OTP_REQUIRED" ? "פג תוקף האימות" : "נדרשת התערבות";
-          const reason = err instanceof BankSyncError ? syncErrorMessage(code, err.details) : ERROR_MESSAGES[code];
           setNotice(
             needsAction
               ? { kind: "attention", text: `${heading} — ${label}: ${attentionReason(lastErrorCode)}` }
-              : {
-                  kind: "error",
-                  text: first ? `${label}: ההתחברות הצליחה, אך משיכת הנתונים נכשלה. ${reason}` : `${label}: ${reason}`,
-                },
+              : { kind: "error", text: `${label}: ${errorReason(err)}` },
           );
-          return { ok: false, error: err };
-        } finally {
-          syncingRef.current = false;
-          currentSync.current = null;
-          setSyncingId(null);
+          return null;
         }
-      })();
-      currentSync.current = run;
-      return run;
+      });
     },
-    [refresh],
-  );
-
-  const syncNow = useCallback(
-    async (id: string) => {
-      const attempt = await startSync(id);
-      return attempt?.ok ? attempt.result : null;
-    },
-    [startSync],
+    [exclusive, refresh],
   );
 
   const connect = useCallback(
     async (companyId: string, credentials: Record<string, string>, startDate: string) => {
-      // Stage 0 (fast): store the credentials, unverified.
-      const { connectionId, connection } = await connectAccount(companyId, credentials, startDate);
-      replace(connection);
-      setBackgroundIds((ids) => [...ids, connectionId]);
-
-      // Stage 1: one sync request = one bank login. It stays open until the
-      // whole scrape ends (Cloud Run only guarantees CPU while a request is in
-      // flight), but the server flags loginVerified the moment the bank
-      // accepts the login, and the live list hands that to the waiter below.
-      let confirmed = false;
-      const loginSeen = new Promise<"login">((resolve) =>
-        loginWaiters.current.set(connectionId, { sawUnverified: false, resolve: () => resolve("login") }),
+      const label = institutionLabel(companyId);
+      const attemptId = crypto.randomUUID();
+      let loginConfirmed = false;
+      const loginSeen = new Promise<{ login: BankConnection }>((resolve) =>
+        attemptWaiters.current.set(attemptId, (c) => {
+          loginConfirmed = true;
+          setSyncingId(c.id); // header + card show the background fetch
+          resolve({ login: c });
+        }),
       );
-      const sync = (async () => {
-        try {
-          // Wait out a sync that's already running (startup auto-sync, "sync now").
-          while (syncingRef.current) await currentSync.current;
-          return await startSync(connectionId, { companyId, loginConfirmed: () => confirmed });
-        } finally {
-          loginWaiters.current.delete(connectionId);
-          setBackgroundIds((ids) => ids.filter((i) => i !== connectionId));
-        }
-      })();
 
-      const first = await Promise.race([loginSeen, sync]);
-      if (first === null) throw new BankSyncError("SCRAPE_IN_PROGRESS", "Another sync is running");
-      if (first !== "login" && !first.ok) throw first.error; // rejected before the login was confirmed
-      confirmed = true;
-      // Stage 2 runs on in the background (same request, same browser); its
-      // outcome replaces this notice when it ends.
-      if (first === "login") {
-        setNotice({ kind: "success", text: `${institutionLabel(companyId)}: התחברת בהצלחה! מושך נתונים ברקע...` });
-      }
-      return connection;
+      // One request = one bank login, kept open for the whole scrape (Cloud
+      // Run only guarantees CPU while a request is in flight).
+      const request = exclusive(async (): Promise<SyncAttempt> => {
+        try {
+          const result = await connectAccount(companyId, credentials, startDate, attemptId);
+          replace(result.connection);
+          setNotice({ kind: "success", text: `${label} חובר בהצלחה — ${addedText(result)}` });
+          return { ok: true, result };
+        } catch (err) {
+          // Before the login was confirmed the dialog is still open and shows
+          // the error itself; nothing was saved. After it, the account exists
+          // and only its first fetch failed.
+          if (loginConfirmed) {
+            setNotice({ kind: "error", text: `${label}: הסנכרון הראשון לא הושלם. ${errorReason(err)}` });
+          }
+          return { ok: false, error: err };
+        } finally {
+          attemptWaiters.current.delete(attemptId);
+        }
+      });
+
+      const first = await Promise.race([loginSeen, request]);
+      if ("login" in first) return first.login;
+      if (!first.ok) throw first.error;
+      return first.result.connection;
     },
-    [startSync],
+    [exclusive],
   );
 
   const isSyncing = useCallback(
-    (c: BankConnection) => syncingId === c.id || backgroundIds.includes(c.id) || c.syncInProgress,
-    [syncingId, backgroundIds],
+    (c: BankConnection) => syncingId === c.id || c.syncInProgress,
+    [syncingId],
   );
 
   const disconnect = useCallback(async (id: string) => {
@@ -280,19 +271,18 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
       for (const c of due) await syncNow(c.id);
     })();
     const flagged = connections.find((c) => c.status === "needs_attention");
-    // Connected earlier, but the first sync never finished (tab closed, timeout).
-    // Not synced automatically: its login hasn't been confirmed yet.
-    const unverified = connections.find((c) => c.status === "syncing" && !c.syncInProgress);
+    // Connected (login verified) but the first fetch never finished.
+    const incomplete = connections.find((c) => c.status === "syncing" && !c.syncInProgress);
     if (flagged) {
       const heading = canRetryWithoutNewCredentials(flagged) ? "פג תוקף האימות" : "נדרשת התערבות";
       setNotice({
         kind: "attention",
         text: `${heading} — ${institutionLabel(flagged.companyId)}: ${attentionReason(flagged.lastErrorCode)}`,
       });
-    } else if (unverified) {
+    } else if (incomplete) {
       setNotice({
         kind: "attention",
-        text: `החיבור ל${institutionLabel(unverified.companyId)} טרם הושלם — פתחו את החשבונות המחוברים ולחצו "סנכרן עכשיו".`,
+        text: `${institutionLabel(incomplete.companyId)}: הסנכרון הראשון לא הושלם — פתחו את החשבונות המחוברים ולחצו "סנכרן עכשיו".`,
       });
     }
   }, [settingsLoading, connectionsLoaded, settings.autoSyncOnStartup, connections, syncNow]);

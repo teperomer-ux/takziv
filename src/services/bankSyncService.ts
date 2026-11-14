@@ -40,19 +40,20 @@ export interface BankConnection {
   id: string;
   companyId: string;
   /**
-   * "syncing": saved, waiting for its first sync to confirm the login (see
-   * connectAccount). "needs_attention": the bank rejected the login / wants
-   * OTP or a password change.
+   * "syncing": the bank accepted the login (connections only exist after that,
+   * see connectAccount); the first fetch is running or didn't complete.
+   * "needs_attention": the bank rejected the saved login / wants OTP or a password change.
    */
   status: "syncing" | "active" | "needs_attention";
   /** A login to this connection is running right now (on any device / the scheduled job). */
   syncInProgress: boolean;
   /**
-   * The bank accepted the saved credentials. False right after connectAccount;
-   * the first sync sets it the moment the login gets through, before it
-   * fetches the transactions.
+   * The bank accepted these credentials. Always true for connections the
+   * user sees: unverified leftovers from older versions are filtered out.
    */
   loginVerified: boolean;
+  /** The connectAccount attempt that last stored these credentials (live list only). */
+  connectAttemptId?: string | null;
   /** e.g. "•••789" */
   maskedLogin: string;
   lastErrorCode: string | null;
@@ -76,10 +77,9 @@ export function needsBackfill(c: BankConnection): boolean {
 
 /**
  * What the user sees as the connection's state:
- *  - verifying:       just connected; the first sync is logging in (login not confirmed yet)
- *  - syncing:         just connected, the bank accepted the login; fetching transactions in the background
- *  - unverified:      just connected, but the first sync didn't finish (timeout, busy
- *                     server, tab closed) — the login hasn't been checked yet; sync to retry
+ *  - syncing:         just connected (the bank accepted the login); fetching transactions in the background
+ *  - sync_incomplete: just connected (the bank accepted the login), but the first fetch didn't
+ *                     finish (timeout, bank error, tab closed); sync to retry, no need to re-enter the login
  *  - active:          healthy
  *  - unstable:        healthy, but the last sync failed on the bank's side (timeout, …); retried automatically
  *  - session_expired: the bank stopped trusting the device and asked for a one-time code;
@@ -89,9 +89,8 @@ export function needsBackfill(c: BankConnection): boolean {
  * `running`: a sync of this connection is in flight (from this tab, or per the server's lease).
  */
 export type ConnectionState =
-  | "verifying"
   | "syncing"
-  | "unverified"
+  | "sync_incomplete"
   | "active"
   | "unstable"
   | "session_expired"
@@ -102,7 +101,7 @@ export function connectionState(
   running = false,
 ): ConnectionState {
   if (c.status === "needs_attention") return c.lastErrorCode === "BANK_OTP_REQUIRED" ? "session_expired" : "reauth_required";
-  if (c.status === "syncing") return !running ? "unverified" : c.loginVerified ? "syncing" : "verifying";
+  if (c.status === "syncing") return running ? "syncing" : "sync_incomplete";
   return c.lastErrorCode ? "unstable" : "active";
 }
 
@@ -171,18 +170,20 @@ export async function listConnections(): Promise<BankConnection[]> {
 }
 
 /**
- * Saves the credentials encrypted on the server as a connection with status
- * "syncing", and returns at once — it does not log in. Follow it with
- * syncConnection(connectionId), which logs in, imports, and marks the
- * connection active (or needs_attention if the bank rejects the login).
- * Replaces the credentials of any existing connection to the same provider.
+ * Connects a provider in one request with one bank login. The server stores
+ * nothing until the bank accepts the login; then the connection appears in
+ * the live list (verified, status "syncing", connectAttemptId = `attemptId`)
+ * while the same session fetches the transactions, and this resolves when the
+ * fetch is done. Rejects with the bank's error if the login fails — no
+ * connection is created, and an existing one keeps its working credentials.
  */
 export function connectAccount(
   companyId: string,
   credentials: Record<string, string>,
   startDate: string,
-): Promise<{ connectionId: string; connection: BankConnection }> {
-  return apiRequest("POST", "/api/connections", { companyId, credentials, startDate });
+  attemptId: string,
+): Promise<ConnectionSyncResult & { connectionId: string }> {
+  return apiRequest("POST", "/api/connections", { companyId, credentials, startDate, attemptId });
 }
 
 const ymdOrNull = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
@@ -195,7 +196,9 @@ function fromDoc(id: string, data: DocumentData): BankConnection {
     companyId: data.companyId,
     status: data.status === "syncing" || data.status === "needs_attention" ? data.status : "active",
     syncInProgress: data.syncLockUntil instanceof Timestamp && data.syncLockUntil.toMillis() > Date.now(),
-    loginVerified: typeof data.loginVerified === "boolean" ? data.loginVerified : data.status !== "syncing" && data.status !== "needs_attention",
+    loginVerified:
+      typeof data.loginVerified === "boolean" ? data.loginVerified : data.status === "active" || !!data.lastSyncAt || !data.status,
+    connectAttemptId: typeof data.connectAttemptId === "string" ? data.connectAttemptId : null,
     maskedLogin: data.maskedLogin ?? "•••",
     lastErrorCode: data.lastErrorCode ?? null,
     lastSyncAt: isoOrNull(data.lastSyncAt),
@@ -224,7 +227,8 @@ export function onConnectionsSnapshot(
     { includeMetadataChanges: true },
     (snap) => {
       if (snap.metadata.fromCache) return;
-      callback(snap.docs.map((d) => fromDoc(d.id, d.data())));
+      // Only logins the bank accepted are "connected accounts" (mirrors the server's listConnections).
+      callback(snap.docs.map((d) => fromDoc(d.id, d.data())).filter((c) => c.loginVerified));
     },
     onError,
   );

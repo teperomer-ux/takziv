@@ -2,17 +2,13 @@ import type { BankSyncErrorCode, ConnectionState } from "../services/bankSyncSer
 
 /** Status label and explanation per connection state (see connectionState). */
 export const CONNECTION_STATE_LABELS: Record<ConnectionState, { label: string; hint: string }> = {
-  verifying: {
-    label: "מאמת פרטי התחברות מול הבנק...",
-    hint: "ההתחברות לבנק נמשכת בדרך כלל 10–40 שניות.",
-  },
   syncing: {
-    label: "התחברת בהצלחה! מושך נתונים ברקע...",
-    hint: "הבנק אישר את פרטי ההתחברות. משיכת העסקאות ממשיכה ברקע — אפשר להמשיך לעבוד.",
+    label: "מושך נתונים ברקע...",
+    hint: "ההתחברות לבנק הצליחה. משיכת העסקאות ממשיכה ברקע — אפשר להמשיך לעבוד.",
   },
-  unverified: {
+  sync_incomplete: {
     label: "הסנכרון הראשון לא הושלם",
-    hint: "פרטי ההתחברות נשמרו אך טרם אומתו מול הבנק. לחצו \"סנכרן עכשיו\" כדי לנסות שוב.",
+    hint: "ההתחברות לבנק הצליחה, אך משיכת העסקאות לא הושלמה. לחצו \"סנכרן עכשיו\" כדי לנסות שוב — אין צורך להזין את הפרטים מחדש.",
   },
   active: { label: "פעיל", hint: "" },
   unstable: { label: "פעיל · הסנכרון האחרון נכשל", hint: "תקלה זמנית מול אתר הבנק. פרטי ההתחברות נשמרו ואפשר לסנכרן שוב." },
@@ -82,6 +78,18 @@ const ATTENTION_REASONS: Record<string, string> = {
   BANK_ACCOUNT_BLOCKED: "הגישה לחשבון חסומה. שחררו את החסימה מול הבנק ועדכנו את פרטי ההתחברות.",
   CREDENTIALS_UNREADABLE: "לא ניתן לפענח את פרטי ההתחברות השמורים. הזינו אותם מחדש.",
 };
+
+/**
+ * The message the connect dialog shows when the login itself failed (nothing
+ * was saved). Wrong credentials get the plain wording; anything else names the
+ * bank's exact reason (timeout, OTP, blocked, …).
+ */
+export function loginErrorMessage(code: BankSyncErrorCode, details?: Record<string, unknown>): string {
+  if (code === "BANK_INVALID_CREDENTIALS" || details?.scraperErrorType === "INVALID_PASSWORD") {
+    return "התחברות נכשלה: שם משתמש או סיסמה שגויים";
+  }
+  return `התחברות נכשלה: ${syncErrorMessage(code, details)}`;
+}
 
 export function attentionReason(lastErrorCode: string | null): string {
   return (lastErrorCode && ATTENTION_REASONS[lastErrorCode]) ?? "החיבור דורש עדכון פרטי התחברות.";

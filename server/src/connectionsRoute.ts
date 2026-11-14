@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { Router, type Response } from "express";
 import { z } from "zod";
 import { CompanyTypes } from "israeli-bank-scrapers";
 import { requireGoogleUser } from "./auth.js";
-import { ApiError, sendError } from "./errors.js";
+import { sendError } from "./errors.js";
 import { missingLoginFields } from "./scrapeRunner.js";
 import {
   ConnectionNotFoundError,
@@ -12,7 +13,7 @@ import {
   updateConnectionStartDate,
   type BankConnection,
 } from "./connectionRepository.js";
-import { defaultStartYmd, isValidStartDate, saveUnverifiedConnection, syncSavedConnection } from "./connectionSync.js";
+import { connectAndSync, defaultStartYmd, isValidStartDate, syncSavedConnection } from "./connectionSync.js";
 import { sendSyncError, syncLogger, syncResponseBody } from "./syncSupport.js";
 
 /**
@@ -27,6 +28,8 @@ const createSchema = z.object({
   companyId: z.enum(CompanyTypes),
   credentials: z.record(z.string().max(100), z.string().min(1).max(200)),
   startDate: z.iso.date().optional(),
+  /** Random id from the client, written on the connection once the login is verified (see connectAndSync). */
+  attemptId: z.uuid().optional(),
 });
 const idSchema = z.uuid();
 const startDateSchema = z.object({ startDate: z.iso.date() });
@@ -62,17 +65,12 @@ connectionsRouter.get("/api/connections", async (_req, res) => {
 });
 
 /**
- * Connects (or re-connects) a provider — the fast half only: validates,
- * encrypts and stores the credentials as status "syncing", and answers 201
- * with the connection right away, without logging in. The client then calls
- * POST /api/connections/:id/sync as a separate request, which logs in,
- * imports, and settles the status (active / needs_attention). See
- * saveUnverifiedConnection for why that isn't run here after responding.
- *
- * A wrong password is still never retried automatically: the scheduled job
- * only syncs active connections, and the first sync flags a rejected login.
- * Re-connecting keeps the existing connection (same id, transactions) and its
- * saved device state, which the next login reuses.
+ * Connects (or re-connects) a provider: one request, one bank login (see
+ * connectAndSync). Nothing is stored unless the bank accepts the login; once it
+ * does, the connection appears (verified, status "syncing", tagged with the
+ * client's attemptId) while the same session fetches the transactions, and
+ * this request answers when the fetch is done. Re-connecting keeps the
+ * existing connection (same id, transactions) and reuses its device state.
  */
 connectionsRouter.post("/api/connections", async (req, res) => {
   const uid: string = res.locals.uid;
@@ -87,8 +85,8 @@ connectionsRouter.post("/api/connections", async (req, res) => {
   const missing = missingLoginFields(companyId, credentials);
   if (missing.length) return sendError(res, "MISSING_CREDENTIAL_FIELDS", { missing });
 
-  const startYmd = parsed.data.startDate ?? defaultStartYmd();
-  if (!isValidStartDate(startYmd)) return invalidStartDate(res);
+  const startDate = parsed.data.startDate ?? defaultStartYmd();
+  if (!isValidStartDate(startDate)) return invalidStartDate(res);
 
   try {
     assertVaultReady();
@@ -97,17 +95,18 @@ connectionsRouter.post("/api/connections", async (req, res) => {
     return sendError(res, "CREDENTIAL_STORE_UNAVAILABLE");
   }
 
+  const log = syncLogger({ uid, companyId, via: "connect" });
   try {
-    const connection = await saveUnverifiedConnection(uid, companyId, credentials, startYmd);
+    const { connection, outcome } = await connectAndSync(uid, companyId, credentials, {
+      startDate,
+      attemptId: parsed.data.attemptId ?? randomUUID(),
+    });
     credentials = undefined;
-    console.info(JSON.stringify({ event: "connection_saved", uid, companyId, connectionId: connection.id }));
-    res.status(201).json({ success: true, companyId, connectionId: connection.id, connection: toJson(connection) });
+    const body = syncResponseBody(outcome);
+    log("success", { saved: body.savedCount, connectionId: connection.id });
+    res.json({ success: true, companyId, connectionId: connection.id, connection: toJson(connection), ...body });
   } catch (err) {
-    // SCRAPE_IN_PROGRESS: a sync of this provider's connection is running, and its
-    // credentials can't be replaced mid-login. CONNECTION_NOT_FOUND: deleted meanwhile.
-    if (err instanceof ApiError) return sendError(res, err.code);
-    console.error(JSON.stringify({ event: "save_connection_failed", companyId, error: String(err) }));
-    sendError(res, "CREDENTIAL_STORE_UNAVAILABLE");
+    sendSyncError(res, err, log);
   } finally {
     credentials = undefined;
   }
