@@ -8,6 +8,7 @@ import {
   getConnection,
   loadCredentials,
   releaseSyncLease,
+  saveConnection,
   saveSession,
   updateConnectionStatus,
   type BankConnection,
@@ -139,7 +140,10 @@ async function withBrowserSlot<T>(fn: () => Promise<T>) {
  *
  * Never retries a login the bank already rejected (status needs_attention
  * over the credentials themselves) — that's how bank accounts get locked —
- * and flags the connection when the bank rejects it now. A connection
+ * and flags the connection when the bank rejects it now. This is also the
+ * first sync of a connection just saved as "syncing": success makes it
+ * active; a rejected login flags it; any other failure leaves it "syncing"
+ * with lastErrorCode set, for the user to retry. A connection
  * flagged only for a one-time code may be retried (see
  * canRetryWithoutNewCredentials); the scheduled job never does, as it only
  * picks active connections.
@@ -204,7 +208,9 @@ export async function syncSavedConnection(
           synced: true,
           ...(fetchedFrom && { syncedFrom: fetchedFrom }),
         });
-        return { connection: await getConnection(uid, connectionId), outcome };
+        // Read while still holding our lease, which withLease releases before
+        // the caller sees this — so the sync is no longer in progress by then.
+        return { connection: { ...(await getConnection(uid, connectionId)), syncInProgress: false }, outcome };
       } catch (err) {
         const apiErr = err instanceof ApiError ? err : new ApiError("INTERNAL_ERROR", { internalMessage: String(err) });
         if (apiErr.code !== "CONNECTION_NEEDS_ATTENTION") {
@@ -220,7 +226,32 @@ export async function syncSavedConnection(
 }
 
 /**
- * For syncs with credentials typed in just now (connect, one-off): holds the
+ * The fast half of connecting (POST /api/connections): encrypts and stores
+ * the credentials as status "syncing" without logging in, so the request
+ * returns in well under a second. The client then calls
+ * syncSavedConnection (POST …/:id/sync) as its own request — on Cloud Run
+ * the CPU is only guaranteed while a request is open, so the 30-60s login
+ * must never run after a response has been sent.
+ *
+ * Re-connecting a provider updates its existing connection under that
+ * connection's lease: new credentials never replace old ones in the middle of
+ * a sync, which would otherwise end by marking the unverified login active.
+ */
+export async function saveUnverifiedConnection(
+  uid: string,
+  companyId: CompanyTypes,
+  credentials: Record<string, string>,
+  startDate: string,
+): Promise<BankConnection> {
+  const connectionId = await findConnectionId(uid, companyId);
+  if (!connectionId) return saveConnection(uid, companyId, credentials, { startDate });
+  await withLease(uid, connectionId, () => saveConnection(uid, companyId, credentials, { connectionId, startDate }));
+  // Read again once the lease is released, so syncInProgress is false.
+  return getConnection(uid, connectionId);
+}
+
+/**
+ * For syncs with credentials typed in just now (one-off): holds the
  * lease of the user's saved connection to the same provider, if there is one,
  * so a scheduled sync can't log in to that account at the same moment.
  * Unlike syncSavedConnection this doesn't refuse needs_attention — re-entering

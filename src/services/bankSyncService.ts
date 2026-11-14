@@ -1,4 +1,5 @@
-import { auth } from "../lib/firebase";
+import { Timestamp, collection, onSnapshot, type DocumentData } from "firebase/firestore";
+import { auth, db, getUidOrNull } from "../lib/firebase";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -38,8 +39,14 @@ export interface BankSyncResult {
 export interface BankConnection {
   id: string;
   companyId: string;
-  /** "needs_attention": the bank rejected the login / wants OTP or a password change. */
-  status: "active" | "needs_attention";
+  /**
+   * "syncing": saved, waiting for its first sync to confirm the login (see
+   * connectAccount). "needs_attention": the bank rejected the login / wants
+   * OTP or a password change.
+   */
+  status: "syncing" | "active" | "needs_attention";
+  /** A login to this connection is running right now (on any device / the scheduled job). */
+  syncInProgress: boolean;
   /** e.g. "•••789" */
   maskedLogin: string;
   lastErrorCode: string | null;
@@ -63,16 +70,22 @@ export function needsBackfill(c: BankConnection): boolean {
 
 /**
  * What the user sees as the connection's state:
+ *  - syncing:         just connected; the first sync is running in the background
+ *  - unverified:      just connected, but the first sync didn't finish (timeout, busy
+ *                     server, tab closed) — the login hasn't been checked yet; sync to retry
  *  - active:          healthy
  *  - unstable:        healthy, but the last sync failed on the bank's side (timeout, …); retried automatically
  *  - session_expired: the bank stopped trusting the device and asked for a one-time code;
  *                     the saved login is fine and can be retried without re-entering it
  *  - reauth_required: the bank rejected the saved login (wrong/expired password, blocked, unreadable)
+ *
+ * `running`: a sync of this connection is in flight (from this tab, or per the server's lease).
  */
-export type ConnectionState = "active" | "unstable" | "session_expired" | "reauth_required";
+export type ConnectionState = "syncing" | "unverified" | "active" | "unstable" | "session_expired" | "reauth_required";
 
-export function connectionState(c: Pick<BankConnection, "status" | "lastErrorCode">): ConnectionState {
+export function connectionState(c: Pick<BankConnection, "status" | "lastErrorCode">, running = false): ConnectionState {
   if (c.status === "needs_attention") return c.lastErrorCode === "BANK_OTP_REQUIRED" ? "session_expired" : "reauth_required";
+  if (c.status === "syncing") return running ? "syncing" : "unverified";
   return c.lastErrorCode ? "unstable" : "active";
 }
 
@@ -141,16 +154,62 @@ export async function listConnections(): Promise<BankConnection[]> {
 }
 
 /**
- * Logs in, imports once, and — only if the login worked — saves the
- * credentials encrypted on the server for future one-click syncs. Replaces
- * any existing connection to the same provider.
+ * Saves the credentials encrypted on the server as a connection with status
+ * "syncing", and returns at once — it does not log in. Follow it with
+ * syncConnection(connectionId), which logs in, imports, and marks the
+ * connection active (or needs_attention if the bank rejects the login).
+ * Replaces the credentials of any existing connection to the same provider.
  */
 export function connectAccount(
   companyId: string,
   credentials: Record<string, string>,
   startDate: string,
-): Promise<ConnectionSyncResult> {
+): Promise<{ connectionId: string; connection: BankConnection }> {
   return apiRequest("POST", "/api/connections", { companyId, credentials, startDate });
+}
+
+const ymdOrNull = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+const isoOrNull = (v: unknown) => (v instanceof Timestamp ? v.toDate().toISOString() : null);
+
+/** A users/{uid}/bankConnections doc as the API would return it (same rules as the server's toConnection). */
+function fromDoc(id: string, data: DocumentData): BankConnection {
+  return {
+    id,
+    companyId: data.companyId,
+    status: data.status === "syncing" || data.status === "needs_attention" ? data.status : "active",
+    syncInProgress: data.syncLockUntil instanceof Timestamp && data.syncLockUntil.toMillis() > Date.now(),
+    maskedLogin: data.maskedLogin ?? "•••",
+    lastErrorCode: data.lastErrorCode ?? null,
+    lastSyncAt: isoOrNull(data.lastSyncAt),
+    startDate: ymdOrNull(data.startDate),
+    syncedFrom: ymdOrNull(data.syncedFrom),
+    sessionSavedAt: isoOrNull(data.sessionSavedAt),
+  };
+}
+
+/**
+ * Live connection list, read straight from Firestore (the owner may read
+ * bankConnections, never write it), so status changes made by a background
+ * sync, another device or the scheduled job show up without polling.
+ * Snapshots served only from the local cache are skipped: a stale status
+ * would briefly flash. Returns the unsubscribe function.
+ */
+export function onConnectionsSnapshot(
+  callback: (connections: BankConnection[]) => void,
+  onError: (err: Error) => void,
+): () => void {
+  const uid = getUidOrNull();
+  if (!uid) return () => {};
+  return onSnapshot(
+    collection(db, "users", uid, "bankConnections"),
+    // Needed to hear the cache → server switch when the data itself didn't change.
+    { includeMetadataChanges: true },
+    (snap) => {
+      if (snap.metadata.fromCache) return;
+      callback(snap.docs.map((d) => fromDoc(d.id, d.data())));
+    },
+    onError,
+  );
 }
 
 /**

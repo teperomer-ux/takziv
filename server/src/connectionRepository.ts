@@ -39,13 +39,28 @@ import { SCRAPE_TIMEOUT_MS } from "./syncSupport.js";
 
 const SECRETS = "bankSecrets";
 
-export type ConnectionStatus = "active" | "needs_attention";
+/**
+ *  syncing          credentials saved by POST /api/connections but not yet
+ *                   confirmed by a login; the first sync (POST …/:id/sync,
+ *                   fired by the client right after) settles it. If that sync
+ *                   fails for a reason that isn't the login's fault (timeout,
+ *                   busy server) it stays here with lastErrorCode set. The
+ *                   scheduled job never picks it up: only a login the user
+ *                   started may try unverified credentials.
+ *  active           the saved login worked
+ *  needs_attention  the bank rejected the login / wants OTP or a password change
+ */
+export type ConnectionStatus = "syncing" | "active" | "needs_attention";
 type KeySource = "kms" | "local";
+
+const STATUSES: ReadonlySet<string> = new Set<ConnectionStatus>(["syncing", "active", "needs_attention"]);
 
 export interface BankConnection {
   id: string;
   companyId: CompanyTypes;
   status: ConnectionStatus;
+  /** True while some sync holds the connection's lease, i.e. a login is running right now. */
+  syncInProgress: boolean;
   /** e.g. "•••789" — the last characters of the login identifier, never a secret field. */
   maskedLogin: string;
   /** API error code of the last failed sync, cleared on success. */
@@ -100,11 +115,13 @@ function connectionsCol(uid: string) {
   return adminDb.collection("users").doc(uid).collection("bankConnections");
 }
 
-function toConnection(id: string, data: FirebaseFirestore.DocumentData): BankConnection {
+export function toConnection(id: string, data: FirebaseFirestore.DocumentData, now = Date.now()): BankConnection {
   return {
     id,
     companyId: data.companyId,
-    status: data.status === "needs_attention" ? "needs_attention" : "active",
+    // Docs written before "syncing" existed have only the two older values.
+    status: STATUSES.has(data.status) ? data.status : "active",
+    syncInProgress: ((data.syncLockUntil as Timestamp | null | undefined)?.toMillis() ?? 0) > now,
     maskedLogin: data.maskedLogin ?? "•••",
     lastErrorCode: data.lastErrorCode ?? null,
     lastSyncAt: (data.lastSyncAt as Timestamp | null)?.toDate() ?? null,
@@ -126,50 +143,40 @@ export async function getConnection(uid: string, connectionId: string): Promise<
 }
 
 /**
- * Stores credentials for a provider, updating the user's existing connection
- * to that provider if there is one (one saved login per provider). Call only
- * after the credentials logged in successfully.
+ * Stores credentials for a provider as status "syncing" (not yet confirmed by
+ * a login), updating `connectionId` — the user's existing connection to that
+ * provider — when given, else creating one (one saved login per provider).
+ * Use saveUnverifiedConnection (connectionSync.ts), which holds the lease.
  *
  * Re-saving keeps the connection id — and with it the transactions, start
- * date and sync history tied to it — and keeps the stored browser session
- * unless a fresher one from this login is given.
+ * date, sync history and the stored browser session (the device trust) —
+ * and clears the previous error.
  */
 export async function saveConnection(
   uid: string,
   companyId: CompanyTypes,
   credentials: Record<string, string>,
-  { synced, startDate, session }: { synced: boolean; startDate: string; session?: BrowserSession | null },
+  { connectionId: existingId, startDate }: { connectionId?: string; startDate: string },
 ): Promise<BankConnection> {
-  const existingId = await findConnectionId(uid, companyId);
   const connectionId = existingId ?? randomUUID();
   const { source, wrapper } = getVault();
   const envelope = await encryptCredentials(wrapper, uid, connectionId, credentials);
-  const sessionFields = session ? await sealSession(uid, connectionId, session) : undefined;
 
   const batch = adminDb.batch();
   batch.set(
     adminDb.collection(SECRETS).doc(connectionId),
-    {
-      uid,
-      companyId,
-      keySource: source,
-      envelope,
-      updatedAt: FieldValue.serverTimestamp(),
-      ...(sessionFields && { session: sessionFields.secret }),
-    },
+    { uid, companyId, keySource: source, envelope, updatedAt: FieldValue.serverTimestamp() },
     { merge: true },
   );
   batch.set(
     connectionsCol(uid).doc(connectionId),
     {
       companyId,
-      status: "active",
+      status: "syncing",
       maskedLogin: maskLogin(companyId, credentials),
       lastErrorCode: null,
       ...(existingId ? {} : { createdAt: FieldValue.serverTimestamp(), lastSyncAt: null, sessionSavedAt: null }),
       startDate,
-      ...(synced && { lastSyncAt: FieldValue.serverTimestamp(), syncedFrom: startDate }),
-      ...(sessionFields && { sessionSavedAt: sessionFields.savedAt }),
     },
     { merge: true },
   );
