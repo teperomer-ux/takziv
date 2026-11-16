@@ -38,6 +38,10 @@ export interface MappedTransaction {
   billingMonth: number;
   billingYear: number;
   source?: TransactionSource;
+  /** Installment purchases (עסקאות תשלומים): which payment this row is, e.g. 3 of 12. */
+  installment?: { number: number; total: number };
+  /** Purchases in a foreign currency: the amount and currency as charged abroad (amount is in ILS). */
+  original?: { amount: number; currency: string };
 }
 
 export interface UserMappings {
@@ -50,7 +54,10 @@ export interface MapResult {
   expenses: MappedTransaction[];
   /** Bank credits (salary, transfers in, …) → users/{uid}/incomeTransactions */
   incomes: MappedTransaction[];
+  /** Pending rows, and foreign-currency rows not yet charged in ILS: imported once they settle. */
   skippedPending: number;
+  /** YYYY-MM-DD of the oldest skipped-pending row, so the next sync reaches back to it; null if none. */
+  oldestPendingDate: string | null;
   /** Bank debits that are the monthly lump-sum credit-card bill. */
   skippedCardPayments: number;
   /** Rows with no amount (or 0): nothing to record in either direction. */
@@ -73,6 +80,30 @@ function toIsraelYmd(iso: string): string {
   return israelDate.format(new Date(iso));
 }
 
+const ILS_CURRENCIES = new Set(["", "ILS", "NIS", "₪", 'ש"ח', "ש״ח"]);
+
+/** Shekels, however the scraper spells it (or leaves it out). */
+export function isIls(currency: string | undefined | null) {
+  return ILS_CURRENCIES.has((currency ?? "").trim().toUpperCase());
+}
+
+/**
+ * The row's signed amount in ILS (0: nothing to record). Some scrapers leave
+ * chargedAmount empty and only fill originalAmount: that is the ILS amount
+ * when the purchase was in shekels. A foreign-currency purchase with no ILS
+ * charge yet (empty or 0) is "unconverted" — originalAmount is in dollars,
+ * euros, … — until the card company charges it.
+ */
+export function chargedIls(
+  txn: Pick<ScrapedAccount["txns"][number], "chargedAmount" | "originalAmount" | "originalCurrency">,
+): number | "unconverted" {
+  if (Number.isFinite(txn.chargedAmount) && txn.chargedAmount !== 0) return txn.chargedAmount;
+  if (!Number.isFinite(txn.originalAmount) || txn.originalAmount === 0) return 0;
+  if (!isIls(txn.originalCurrency)) return "unconverted";
+  // Shekels: an empty charge falls back to the original; an explicit 0 stays 0.
+  return Number.isFinite(txn.chargedAmount) ? 0 : txn.originalAmount;
+}
+
 /**
  * Maps scraper output onto the app's Transaction shape, mirroring how the
  * former file uploaders split the data:
@@ -93,20 +124,37 @@ export function mapScrapedTransactions(
   const source = SOURCE_BY_COMPANY[companyId];
   const isBank = source === "bank";
   const seen = new Map<string, number>();
-  const result: MapResult = { expenses: [], incomes: [], skippedPending: 0, skippedCardPayments: 0, skippedZeroAmount: 0 };
+  const result: MapResult = {
+    expenses: [],
+    incomes: [],
+    skippedPending: 0,
+    oldestPendingDate: null,
+    skippedCardPayments: 0,
+    skippedZeroAmount: 0,
+  };
+  const skipPending = (txn: ScrapedAccount["txns"][number]) => {
+    result.skippedPending++;
+    const date = toIsraelYmd(txn.date);
+    if (!result.oldestPendingDate || date < result.oldestPendingDate) result.oldestPendingDate = date;
+  };
 
   for (const account of accounts) {
     for (const txn of account.txns) {
       if (txn.status === "pending") {
-        result.skippedPending++;
+        skipPending(txn);
         continue;
       }
 
       const description = txn.description.trim();
       // The sign is the direction: debits are negative, credits positive.
-      // Some scrapers leave chargedAmount empty and only fill originalAmount.
-      const charged = Number.isFinite(txn.chargedAmount) ? txn.chargedAmount : txn.originalAmount;
-      if (!Number.isFinite(charged) || charged === 0) {
+      const charged = chargedIls(txn);
+      if (charged === "unconverted") {
+        // Bought in a foreign currency, not yet charged in shekels: its ILS
+        // amount isn't known. Treated as pending — never stored in dollars.
+        skipPending(txn);
+        continue;
+      }
+      if (charged === 0) {
         result.skippedZeroAmount++;
         continue;
       }
@@ -135,6 +183,14 @@ export function mapScrapedTransactions(
       const occurrence = (seen.get(identity) ?? 0) + 1;
       seen.set(identity, occurrence);
       const id = createHash("sha256").update(`${identity}#${occurrence}`).digest("hex").slice(0, 40);
+      const extra: Pick<MappedTransaction, "installment" | "original"> = {
+        ...(txn.installments?.total && txn.installments.total > 1 && {
+          installment: { number: txn.installments.number, total: txn.installments.total },
+        }),
+        ...(!isIls(txn.originalCurrency) &&
+          Number.isFinite(txn.originalAmount) &&
+          txn.originalAmount !== 0 && { original: { amount: Math.abs(txn.originalAmount), currency: txn.originalCurrency } }),
+      };
 
       if (isIncome) {
         const match = suggestIncomeCategory(description, mappings.income);
@@ -147,6 +203,7 @@ export function mapScrapedTransactions(
           subCategory: match?.subCategory ?? "",
           billingMonth,
           billingYear,
+          ...extra,
         });
         continue;
       }
@@ -165,6 +222,7 @@ export function mapScrapedTransactions(
         billingMonth,
         billingYear,
         source,
+        ...extra,
       });
     }
   }

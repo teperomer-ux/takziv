@@ -20,8 +20,31 @@ const AUTO_SYNC_AFTER_MS = 24 * 60 * 60 * 1000;
 
 type SyncAttempt = { ok: true; result: ConnectionSyncResult } | { ok: false; error: unknown };
 
-function addedText(r: ConnectionSyncResult) {
-  return r.savedCount > 0 ? `נוספו ${r.savedCount.toLocaleString("he-IL")} תנועות חדשות לאישור` : "אין תנועות חדשות";
+interface QueueOptions {
+  /** Called if the run has to wait for another sync first. */
+  onQueued?: () => void;
+  /** Aborting it while still queued cancels the run (it rejects with ConnectCancelledError). */
+  signal?: AbortSignal;
+}
+
+export interface ConnectOptions extends QueueOptions {
+  /** Called when the login actually starts (straight away, or once the queue reaches it). */
+  onStart?: () => void;
+}
+
+/** A connect cancelled while it waited in the queue: no request was sent. */
+export class ConnectCancelledError extends Error {
+  constructor() {
+    super("Connect cancelled while queued");
+  }
+}
+
+/** "נוספו 12 תנועות חדשות לאישור · 40 כבר היו קיימות" */
+export function addedText(r: Pick<ConnectionSyncResult, "savedCount" | "alreadySavedCount">) {
+  const added =
+    r.savedCount > 0 ? `נוספו ${r.savedCount.toLocaleString("he-IL")} תנועות חדשות לאישור` : "אין תנועות חדשות";
+  const existing = r.alreadySavedCount ?? 0;
+  return existing > 0 ? `${added} · ${existing.toLocaleString("he-IL")} כבר היו קיימות` : added;
 }
 
 function errorReason(err: unknown) {
@@ -41,6 +64,8 @@ interface BankSyncContextValue {
   syncingId: string | null;
   /** True while a sync of this connection runs or is queued: from this tab, or (per the server's lease) anywhere. */
   isSyncing: (c: BankConnection) => boolean;
+  /** True while a sync of this connection waits in this tab's queue behind another one. */
+  isQueued: (c: BankConnection) => boolean;
   notice: SyncNotice | null;
   dismissNotice: () => void;
   refresh: () => Promise<void>;
@@ -52,8 +77,15 @@ interface BankSyncContextValue {
    * the same session then fetches the transactions in the background; the
    * outcome arrives through the live list and a notice. Rejects with the
    * error (BankSyncError) if the login fails; no connection is created.
+   * If another sync is running it waits its turn first (`onQueued`), and can
+   * be cancelled then through `signal` (ConnectCancelledError).
    */
-  connect: (companyId: string, credentials: Record<string, string>, startDate: string) => Promise<BankConnection>;
+  connect: (
+    companyId: string,
+    credentials: Record<string, string>,
+    startDate: string,
+    options?: ConnectOptions,
+  ) => Promise<BankConnection>;
   disconnect: (id: string) => Promise<void>;
   /** Saves where future syncs of one connection fetch from (YYYY-MM-DD). Throws BankSyncError. */
   setStartDate: (id: string, startDate: string) => Promise<void>;
@@ -80,6 +112,19 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
   const [connections, setConnections] = useState<BankConnection[]>([]);
   const [connectionsLoaded, setConnectionsLoaded] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
+  const syncingIdRef = useRef(syncingId);
+  syncingIdRef.current = syncingId;
+  /** Saved connections waiting for the running sync to finish (one bank login at a time). */
+  const [queuedIds, setQueuedIds] = useState<string[]>([]);
+  const queuedRef = useRef(new Set<string>());
+  const enqueue = useCallback((id: string) => {
+    queuedRef.current.add(id);
+    setQueuedIds([...queuedRef.current]);
+  }, []);
+  const dequeue = useCallback((id: string) => {
+    if (!queuedRef.current.delete(id)) return;
+    setQueuedIds([...queuedRef.current]);
+  }, []);
   const [notice, setNotice] = useState<SyncNotice | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const syncingRef = useRef(false);
@@ -144,8 +189,11 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
    * already running: the server allows one per user anyway, and parallel
    * logins are what get bank accounts locked.
    */
-  const exclusive = useCallback(async <T,>(run: () => Promise<T>): Promise<T> => {
-    while (syncingRef.current) await currentSync.current;
+  const exclusive = useCallback(async <T,>(run: () => Promise<T>, { onQueued, signal }: QueueOptions = {}): Promise<T> => {
+    if (syncingRef.current) onQueued?.();
+    while (syncingRef.current) await currentSync.current?.catch(() => {});
+    // Cancelled while it waited: nothing ran, nothing was sent.
+    if (signal?.aborted) throw new ConnectCancelledError();
     syncingRef.current = true;
     const p = (async () => {
       try {
@@ -162,10 +210,11 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
 
   const syncNow = useCallback(
     async (id: string): Promise<ConnectionSyncResult | null> => {
-      // A tap while another sync runs is ignored rather than queued.
-      if (syncingRef.current) return null;
+      // Already running or already waiting its turn: one is enough.
+      if (syncingIdRef.current === id || queuedRef.current.has(id)) return null;
       const label = institutionLabel(connectionsRef.current.find((c) => c.id === id)?.companyId ?? "");
       return exclusive(async () => {
+        dequeue(id);
         setSyncingId(id);
         try {
           const result = await syncConnection(id);
@@ -187,13 +236,13 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
           );
           return null;
         }
-      });
+      }, { onQueued: () => enqueue(id) });
     },
-    [exclusive, refresh],
+    [exclusive, refresh, enqueue, dequeue],
   );
 
   const connect = useCallback(
-    async (companyId: string, credentials: Record<string, string>, startDate: string) => {
+    async (companyId: string, credentials: Record<string, string>, startDate: string, options: ConnectOptions = {}) => {
       const label = institutionLabel(companyId);
       const attemptId = crypto.randomUUID();
       let loginConfirmed = false;
@@ -208,6 +257,7 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
       // One request = one bank login, kept open for the whole scrape (Cloud
       // Run only guarantees CPU while a request is in flight).
       const request = exclusive(async (): Promise<SyncAttempt> => {
+        options.onStart?.();
         try {
           const result = await connectAccount(companyId, credentials, startDate, attemptId);
           replace(result.connection);
@@ -224,6 +274,10 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
         } finally {
           attemptWaiters.current.delete(attemptId);
         }
+      }, { onQueued: options.onQueued, signal: options.signal }).catch((error: unknown): SyncAttempt => {
+        // Cancelled while queued: the request never left the browser.
+        attemptWaiters.current.delete(attemptId);
+        return { ok: false, error };
       });
 
       const first = await Promise.race([loginSeen, request]);
@@ -238,6 +292,8 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     (c: BankConnection) => syncingId === c.id || c.syncInProgress,
     [syncingId],
   );
+
+  const isQueued = useCallback((c: BankConnection) => queuedIds.includes(c.id), [queuedIds]);
 
   const disconnect = useCallback(async (id: string) => {
     await removeConnection(id);
@@ -267,9 +323,9 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     autoSyncStarted.current = true;
 
     const due = connections.filter((c) => c.status === "active" && isStale(c));
-    (async () => {
-      for (const c of due) await syncNow(c.id);
-    })();
+    // All requested at once: they run one after another (exclusive), and the
+    // ones still waiting show "ממתין בתור לסנכרון..." on their cards.
+    for (const c of due) void syncNow(c.id);
     const flagged = connections.find((c) => c.status === "needs_attention");
     // Connected (login verified) but the first fetch never finished.
     const incomplete = connections.find((c) => c.status === "syncing" && !c.syncInProgress);
@@ -292,6 +348,7 @@ export function useBankSyncProvider(settings: AppSettings, settingsLoading: bool
     connectionsLoaded,
     syncingId,
     isSyncing,
+    isQueued,
     notice,
     dismissNotice: useCallback(() => setNotice(null), []),
     refresh,

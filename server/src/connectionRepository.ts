@@ -75,6 +75,12 @@ export interface BankConnection {
   syncedFrom: string | null;
   /** When the browser session (trusted-device state) was last captured; null if never. */
   sessionSavedAt: Date | null;
+  /**
+   * YYYY-MM-DD of the oldest transaction that was still pending (or not yet
+   * converted from a foreign currency) at the last sync; the next sync reaches
+   * back to it so the settled row is imported. Null when nothing was pending.
+   */
+  pendingFrom: string | null;
 }
 
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
@@ -134,7 +140,35 @@ export function toConnection(id: string, data: FirebaseFirestore.DocumentData, n
     startDate: ymdOrNull(data.startDate),
     syncedFrom: ymdOrNull(data.syncedFrom),
     sessionSavedAt: (data.sessionSavedAt as Timestamp | null | undefined)?.toDate() ?? null,
+    pendingFrom: ymdOrNull(data.pendingFrom),
   };
+}
+
+/**
+ * Deletes the user's connections that never had their login verified —
+ * leftovers saved by versions before connectAndSync wrote only verified
+ * logins. They are already hidden and never synced; this keeps them (and
+ * their encrypted secrets) out of the database. Connections whose lease is
+ * live are left alone. Returns how many were removed.
+ */
+export async function purgeUnverifiedConnections(uid: string, now = Date.now()): Promise<number> {
+  const snapshot = await connectionsCol(uid).get();
+  const stale = snapshot.docs.filter((d) => {
+    const c = toConnection(d.id, d.data(), now);
+    return !c.loginVerified && !c.syncInProgress;
+  });
+  if (!stale.length) return 0;
+  const secrets = await adminDb.getAll(...stale.map((d) => adminDb.collection(SECRETS).doc(d.id)));
+  const batch = adminDb.batch();
+  stale.forEach((d, i) => {
+    // Only if untouched since we read it: a connect that just re-saved the
+    // doc as verified makes the whole batch fail instead (retried next list).
+    batch.delete(d.ref, { lastUpdateTime: d.updateTime });
+    const secret = secrets[i];
+    if (secret.exists && (secret.data() as SecretDoc).uid === uid) batch.delete(secret.ref);
+  });
+  await batch.commit();
+  return stale.length;
 }
 
 /** The user's connected accounts: only logins the bank has accepted (see isVisibleConnection). */
@@ -293,6 +327,8 @@ export async function updateConnectionStatus(
     synced?: boolean;
     syncedFrom?: string;
     loginVerified?: boolean;
+    /** Set on a successful sync; null clears it (nothing pending any more). */
+    pendingFrom?: string | null;
   },
 ) {
   const { synced, ...fields } = update;

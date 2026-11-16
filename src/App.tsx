@@ -160,6 +160,7 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
   const settingsCtx = useSettingsProvider();
   const bankSync = useBankSyncProvider(settingsCtx.settings, settingsCtx.loading);
   const syncingConnection = bankSync.connections.find((c) => c.id === bankSync.syncingId);
+  const queuedCount = bankSync.connections.filter(bankSync.isQueued).length;
 
   function prevMonth() {
     if (month === 1) { setMonth(year - 1, 12); incomeTx.setMonth(year - 1, 12); }
@@ -199,7 +200,10 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
               title="סנכרון ברקע"
             >
               <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="hidden sm:inline">מסנכרן את {institutionLabel(syncingConnection.companyId)}…</span>
+              <span className="hidden sm:inline">
+                מסנכרן את {institutionLabel(syncingConnection.companyId)}…
+                {queuedCount > 0 && ` (+${queuedCount} בתור)`}
+              </span>
             </button>
           )}
           <div className="absolute start-0 flex items-center gap-0.5">

@@ -29,6 +29,11 @@ export interface BankSyncResult {
   /** Bank credits saved to users/{uid}/incomeTransactions. */
   savedIncomeCount: number;
   duplicateCount: number;
+  /** Fetched again but already in the app (never overwritten). Absent from older servers. */
+  alreadySavedCount?: number;
+  /** Deleted by the user earlier, so not brought back. Absent from older servers. */
+  dismissedCount?: number;
+  /** Pending (or not yet converted from a foreign currency): imported by a later sync once settled. */
   skippedPendingCount: number;
   /** Bank debits that were credit-card bill payments (covered by the card's own sync). */
   skippedCardPaymentCount: number;

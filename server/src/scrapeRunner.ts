@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import puppeteer, { type Page } from "puppeteer";
+import puppeteer, { type Browser, type Page } from "puppeteer";
 import {
   createScraper,
   SCRAPERS,
@@ -55,12 +55,76 @@ export function profileDir(profileId: string | undefined): string | undefined {
 
 // Required to run Chromium as root inside a container without a user namespace
 // sandbox; --disable-dev-shm-usage avoids crashes from Docker's tiny /dev/shm.
-const BROWSER_ARGS = [
+// The rest present the browser as an ordinary Israeli desktop Chrome (Hebrew
+// UI, no automation banner / navigator.webdriver) — bank sites treat an
+// obviously automated browser as suspicious — and trim background work that
+// only costs memory in a 1–2 GiB Cloud Run instance.
+export const BROWSER_ARGS = [
   "--no-sandbox",
   "--disable-setuid-sandbox",
   "--disable-dev-shm-usage",
   "--disable-gpu",
+  "--lang=he-IL",
+  "--disable-blink-features=AutomationControlled",
+  "--disable-extensions",
+  "--disable-background-networking",
+  "--disable-default-apps",
+  "--disable-sync",
+  "--no-first-run",
+  "--mute-audio",
 ];
+
+const TIMEZONE = "Asia/Jerusalem";
+const ACCEPT_LANGUAGE = "he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7";
+/** How long browser.close() may take before the Chromium process is killed. */
+const BROWSER_CLOSE_TIMEOUT_MS = 10_000;
+/** A retry is only attempted if at least this much of the scrape budget is left. */
+const MIN_RETRY_BUDGET_MS = 90_000;
+const RETRY_BACKOFF_MS = 3_000;
+
+/** The headless user agent with its "HeadlessChrome" token, which many sites block outright, made ordinary. */
+export function desktopUserAgent(ua: string) {
+  return ua.replace(/HeadlessChrome/g, "Chrome");
+}
+
+/**
+ * Network-level failures (connection reset, DNS hiccup, the page's target
+ * crashing) that say nothing about the login itself: worth one more try.
+ * Navigation timeouts are not retried — they already used up most of the
+ * budget — and neither is anything the bank answered (wrong password, OTP, …).
+ */
+export function isTransientScrapeError(err: unknown) {
+  if (!(err instanceof ApiError) || err.code !== "BANK_ERROR") return false;
+  const message = String(err.details?.internalMessage ?? "");
+  return /net::ERR_|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|Target closed|Session closed|Protocol error|detached Frame|Execution context was destroyed/i.test(
+    message,
+  );
+}
+
+/**
+ * Closes the browser, and kills its process if it doesn't close in time —
+ * a hung Chromium left behind would hold hundreds of MB until the instance
+ * is recycled.
+ */
+export async function closeBrowser(browser: Browser, timeoutMs = BROWSER_CLOSE_TIMEOUT_MS) {
+  let timer: NodeJS.Timeout | undefined;
+  const closed = await Promise.race([
+    browser.close().then(
+      () => true,
+      () => false,
+    ),
+    new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (closed) return;
+  const proc = browser.process();
+  if (proc && proc.exitCode === null && !proc.killed) {
+    console.warn(JSON.stringify({ event: "browser_force_killed", pid: proc.pid }));
+    proc.kill("SIGKILL");
+  }
+}
 
 /** ScraperErrorTypes (israeli-bank-scrapers doesn't export the enum) → API error code. */
 const ERROR_CODE_BY_SCRAPER_ERROR: Record<string, ApiErrorCode> = {
@@ -130,7 +194,34 @@ export async function runScrape(
   companyId: CompanyTypes,
   credentials: Record<string, string>,
   startDate: Date,
-  { headless = true, session, onSession, onLoginSuccess, profileId }: RunScrapeOptions = {},
+  options: RunScrapeOptions = {},
+): Promise<ScrapedAccount[]> {
+  // One budget for the whole run, retry included.
+  const deadline = Date.now() + SCRAPE_TIMEOUT_MS;
+  const state = { loggedIn: false };
+  try {
+    return await runScrapeOnce(companyId, credentials, startDate, options, deadline, state);
+  } catch (err) {
+    // Only before the login got through: once it has, a second login is a
+    // second bank session for the same user, and the fetch failure is better
+    // reported (the connection keeps its verified login either way).
+    const retry = !state.loggedIn && isTransientScrapeError(err) && deadline - Date.now() >= MIN_RETRY_BUDGET_MS;
+    if (!retry) throw err;
+    console.warn(
+      JSON.stringify({ event: "scrape_retry", companyId, reason: String((err as ApiError).details?.internalMessage ?? "") }),
+    );
+    await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+    return runScrapeOnce(companyId, credentials, startDate, options, deadline, state);
+  }
+}
+
+async function runScrapeOnce(
+  companyId: CompanyTypes,
+  credentials: Record<string, string>,
+  startDate: Date,
+  { headless = true, session, onSession, onLoginSuccess, profileId }: RunScrapeOptions,
+  deadline: number,
+  state: { loggedIn: boolean },
 ): Promise<ScrapedAccount[]> {
   const userDataDir = profileDir(profileId);
   if (userDataDir) mkdirSync(userDataDir, { recursive: true });
@@ -138,12 +229,16 @@ export async function runScrape(
   const browser = await puppeteer.launch({
     headless,
     args: BROWSER_ARGS,
+    // Drops the "controlled by automated software" switch (and with it navigator.webdriver).
+    ignoreDefaultArgs: ["--enable-automation"],
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     userDataDir,
+    env: { ...process.env, TZ: TIMEZONE },
   });
   let timer: NodeJS.Timeout | undefined;
   let probeTimer: NodeJS.Timeout | undefined;
   let loggedIn = false;
+  const userAgent = desktopUserAgent(await browser.userAgent().catch(() => ""));
 
   try {
     let page: Page | undefined;
@@ -158,6 +253,13 @@ export async function runScrape(
       defaultTimeout: NAVIGATION_TIMEOUT_MS,
       preparePage: async (p) => {
         page = p;
+        // An Israeli desktop browser: Hebrew, Jerusalem time. A scraper that
+        // sets its own user agent (Cal) overrides this one at login.
+        await Promise.all([
+          userAgent && p.setUserAgent(userAgent),
+          p.setExtraHTTPHeaders({ "Accept-Language": ACCEPT_LANGUAGE }),
+          p.emulateTimezone(TIMEZONE),
+        ]).catch((err) => console.warn(JSON.stringify({ event: "page_locale_failed", companyId, error: String(err) })));
         // Before the first navigation, so the bank's login page already sees
         // the device it trusted last time.
         if (session) {
@@ -170,6 +272,7 @@ export async function runScrape(
     scraper.onProgress((_, { type }) => {
       if (type !== "LOGIN_SUCCESS" || loggedIn) return;
       loggedIn = true;
+      state.loggedIn = true;
       Promise.resolve()
         .then(onLoginSuccess)
         .catch((err) => console.warn(JSON.stringify({ event: "login_success_hook_failed", companyId, error: String(err) })));
@@ -181,7 +284,10 @@ export async function runScrape(
     scrape.catch(() => {});
 
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new ApiError("BANK_TIMEOUT", { scraperErrorType: "TIMEOUT" })), SCRAPE_TIMEOUT_MS);
+      timer = setTimeout(
+        () => reject(new ApiError("BANK_TIMEOUT", { scraperErrorType: "TIMEOUT" })),
+        Math.max(0, deadline - Date.now()),
+      );
     });
 
     const racers: Promise<unknown>[] = [scrape, timeout];
@@ -226,6 +332,6 @@ export async function runScrape(
         console.warn(JSON.stringify({ event: "session_export_failed", companyId, error: String(err) }));
       }
     }
-    await browser.close().catch(() => {});
+    await closeBrowser(browser);
   }
 }

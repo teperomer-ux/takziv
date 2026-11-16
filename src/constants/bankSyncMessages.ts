@@ -1,5 +1,8 @@
 import type { BankSyncErrorCode, ConnectionState } from "../services/bankSyncService";
 
+/** A sync (or a new connection) waiting for the one running now: one bank login at a time. */
+export const QUEUED_LABEL = "ממתין בתור לסנכרון...";
+
 /** Status label and explanation per connection state (see connectionState). */
 export const CONNECTION_STATE_LABELS: Record<ConnectionState, { label: string; hint: string }> = {
   syncing: {

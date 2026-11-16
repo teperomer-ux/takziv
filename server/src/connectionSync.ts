@@ -17,7 +17,7 @@ import {
   type BankConnection,
 } from "./connectionRepository.js";
 import { CredentialVaultError } from "./credentialVault.js";
-import { REQUIRES_ACTION, acquireBrowserSlot } from "./syncSupport.js";
+import { REQUIRES_ACTION, browserSlotStats, waitForBrowserSlot } from "./syncSupport.js";
 
 /**
  * Syncing a saved connection, shared by POST /api/connections/:id/sync and
@@ -81,12 +81,16 @@ export function needsBackfill(c: Pick<BankConnection, "startDate" | "syncedFrom"
  * Where a sync of a saved connection starts:
  *  - an explicit override (POST …/sync with a startDate) wins, for that sync only;
  *  - a start date earlier than what's been fetched → backfill from it, once;
- *  - otherwise incremental: last sync minus OVERLAP_DAYS, never before the
- *    saved start date, never more than MAX_LOOKBACK_DAYS back.
+ *  - otherwise incremental: last sync minus OVERLAP_DAYS — or earlier, back
+ *    to the oldest transaction that was still pending last time
+ *    (`pendingFrom`), so a charge that takes longer than OVERLAP_DAYS to
+ *    settle (foreign currency, hotels, car rentals) is still picked up once it
+ *    does — never before the saved start date, never more than
+ *    MAX_LOOKBACK_DAYS back.
  * `fetchedFrom` is set when the sync reaches back to a new earliest date.
  */
 export function syncWindow(
-  c: Pick<BankConnection, "startDate" | "syncedFrom" | "lastSyncAt">,
+  c: Pick<BankConnection, "startDate" | "syncedFrom" | "lastSyncAt"> & { pendingFrom?: string | null },
   override?: string,
   now = new Date(),
 ): { start: Date; fetchedFrom?: string } {
@@ -97,6 +101,7 @@ export function syncWindow(
   }
 
   let start = c.lastSyncAt ? new Date(c.lastSyncAt.getTime() - OVERLAP_DAYS * 86_400_000) : defaultStartDate();
+  if (c.pendingFrom && new Date(c.pendingFrom) < start) start = new Date(c.pendingFrom);
   const floor = new Date(now.getTime() - MAX_LOOKBACK_DAYS * 86_400_000);
   if (start < floor) start = floor;
   if (c.startDate && start < new Date(c.startDate)) start = new Date(c.startDate);
@@ -125,10 +130,20 @@ async function withLease<T>(uid: string, connectionId: string, fn: (connection: 
   }
 }
 
-/** Runs `fn` in one of this instance's browser slots; throws SERVER_BUSY if none is free. */
+/**
+ * Runs `fn` in one of this instance's browser slots, queueing for up to
+ * QUEUE_WAIT_MS behind the syncs already running; throws SERVER_BUSY only if
+ * no slot frees up in that time.
+ */
 async function withBrowserSlot<T>(fn: () => Promise<T>) {
-  const release = acquireBrowserSlot();
-  if (!release) throw new ApiError("SERVER_BUSY");
+  const queuedAt = Date.now();
+  const release = await waitForBrowserSlot();
+  if (!release) {
+    console.warn(JSON.stringify({ event: "browser_queue_timeout", waitedMs: Date.now() - queuedAt, ...browserSlotStats() }));
+    throw new ApiError("SERVER_BUSY");
+  }
+  const waitedMs = Date.now() - queuedAt;
+  if (waitedMs > 1000) console.info(JSON.stringify({ event: "browser_queue_wait", waitedMs }));
   try {
     return await fn();
   } finally {
@@ -211,6 +226,7 @@ export async function syncSavedConnection(
           lastErrorCode: null,
           loginVerified: true,
           synced: true,
+          pendingFrom: outcome.oldestPendingDate,
           ...(fetchedFrom && { syncedFrom: fetchedFrom }),
         });
         // Read while still holding our lease, which withLease releases before
@@ -323,6 +339,7 @@ export async function connectAndSync(
         lastErrorCode: null,
         loginVerified: true,
         synced: true,
+        pendingFrom: outcome.oldestPendingDate,
         ...(reachesFurther && { syncedFrom: startDate }),
       });
       return { connection: { ...(await getConnection(uid, connectionId)), syncInProgress: false }, outcome };

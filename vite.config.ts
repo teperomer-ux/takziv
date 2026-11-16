@@ -6,6 +6,21 @@ import { VitePWA } from "vite-plugin-pwa";
 const BRAND_COLOR = "#0f766e"; // --color-primary (teal-700), the header colour
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        // Vendor code in its own long-lived chunks: an app deploy then only
+        // invalidates the (small) app chunk, and the PWA re-downloads less.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (/[\\/]node_modules[\\/](@firebase|firebase)[\\/]/.test(id)) {
+            return /[\\/](auth)[\\/]/.test(id) ? "vendor-firebase-auth" : "vendor-firebase";
+          }
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return "vendor-react";
+        },
+      },
+    },
+  },
   server: {
     // Used when VITE_API_BASE_URL is empty (npm run dev:lan): the app calls
     // /api on its own origin, so a phone on the LAN reaches the sync server

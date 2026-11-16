@@ -10,6 +10,7 @@ import {
   assertVaultReady,
   deleteConnection,
   listConnections,
+  purgeUnverifiedConnections,
   updateConnectionStartDate,
   type BankConnection,
 } from "./connectionRepository.js";
@@ -55,8 +56,14 @@ function parseId(id: unknown, res: Response) {
 }
 
 connectionsRouter.get("/api/connections", async (_req, res) => {
+  const uid: string = res.locals.uid;
+  // The app lists connections on every load: a good moment to drop leftovers
+  // saved unverified by older versions. Not awaited — the list doesn't need it.
+  purgeUnverifiedConnections(uid)
+    .then((removed) => removed && console.info(JSON.stringify({ event: "unverified_connections_purged", uid, removed })))
+    .catch((err) => console.error(JSON.stringify({ event: "purge_unverified_failed", error: String(err) })));
   try {
-    const connections = await listConnections(res.locals.uid);
+    const connections = await listConnections(uid);
     res.json({ success: true, connections: connections.map(toJson) });
   } catch (err) {
     console.error(JSON.stringify({ event: "list_connections_failed", error: String(err) }));

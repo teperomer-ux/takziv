@@ -8,6 +8,24 @@ export interface ExistingRow {
   amount: number;
   description: string;
   source?: string;
+  billingMonth?: number;
+  billingYear?: number;
+  /** "3/12" for an installment row saved with it. */
+  installment?: string;
+}
+
+/**
+ * Whether `row` can be the same charge as an installment candidate. Every
+ * payment of an installment purchase (עסקה בתשלומים) carries the original
+ * purchase date, amount and business name — only the billing month (and the
+ * "n of N" marker) tells payment 3 from payment 2. Without this check each
+ * new payment would be swallowed as a "duplicate" of the previous one.
+ */
+function sameInstallment(tx: MappedTransaction, row: ExistingRow) {
+  if (!tx.installment) return true;
+  if (row.installment) return row.installment === `${tx.installment.number}/${tx.installment.total}`;
+  if (row.billingMonth === undefined || row.billingYear === undefined) return false;
+  return row.billingMonth === tx.billingMonth && row.billingYear === tx.billingYear;
 }
 
 const KNOWN_SOURCES = new Set(["max", "isracard", "cal", "bank"]);
@@ -50,13 +68,17 @@ export function findContentDuplicates(candidates: MappedTransaction[], existing:
   for (const tx of candidates) {
     const rows = pool.get(contentKey(tx.date, tx.amount, tx.description));
     if (!rows) continue;
-    const idx = rows.findIndex((r) => !r.source || !KNOWN_SOURCES.has(r.source) || r.source === tx.source);
+    const idx = rows.findIndex(
+      (r) => (!r.source || !KNOWN_SOURCES.has(r.source) || r.source === tx.source) && sameInstallment(tx, r),
+    );
     if (idx === -1) continue;
     rows.splice(idx, 1);
     duplicates.add(tx.id);
   }
   return duplicates;
 }
+
+const billingKey = (r: ExistingRow) => (r.billingYear && r.billingMonth ? `${r.billingYear}-${r.billingMonth}` : "");
 
 /** A stored row as the duplicate cleanup sees it. */
 export interface StoredRow extends ExistingRow {
@@ -98,7 +120,9 @@ export interface CleanupPlan {
 export function planDuplicateCleanup(rows: StoredRow[]): CleanupPlan {
   const groups = new Map<string, StoredRow[]>();
   for (const row of rows) {
-    const key = `${row.source ?? ""}|${contentKey(row.date, row.amount, row.description)}`;
+    // The billing period keeps the payments of one installment purchase apart:
+    // they share date, amount and business, but are billed in different months.
+    const key = `${row.source ?? ""}|${billingKey(row)}|${contentKey(row.date, row.amount, row.description)}`;
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
 
@@ -109,6 +133,7 @@ export function planDuplicateCleanup(rows: StoredRow[]): CleanupPlan {
       (r) =>
         r.synced &&
         r.date === group[0].date &&
+        billingKey(r) === billingKey(group[0]) &&
         Math.round(r.amount * 100) === Math.round(group[0].amount * 100) &&
         (!group[0].source || r.source === group[0].source),
     ).length;

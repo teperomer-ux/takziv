@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Check, Loader2, Plus, RefreshCw, AlertTriangle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, Clock, Loader2, Plus, RefreshCw, AlertTriangle } from "lucide-react";
 import {
   syncBankTransactions,
   BankSyncError,
@@ -9,12 +9,13 @@ import {
   type BankSyncErrorCode,
   type BankSyncResult,
 } from "../services/bankSyncService";
-import { useBankSync } from "../hooks/useBankSync";
+import { ConnectCancelledError, useBankSync } from "../hooks/useBankSync";
 import { useSettings } from "../hooks/useSettings";
 import { INSTITUTIONS, findInstitution, type LoginField } from "../constants/institutions";
 import {
   CONNECTION_STATE_LABELS,
   ERROR_MESSAGES,
+  QUEUED_LABEL,
   attentionReason,
   loginErrorMessage,
   syncErrorMessage,
@@ -91,6 +92,8 @@ type Phase =
   | { name: "form" }
   /** One-off sync: logging in and fetching, 30-60s. */
   | { name: "loading" }
+  /** Connecting, stage 0: another sync is running; this login starts when it ends (cancellable). */
+  | { name: "queued" }
   /** Connecting, stage 1: waiting for the bank to accept the login. Nothing is saved yet. */
   | { name: "verifying" }
   /** The bank accepted the login: shown briefly, then the dialog closes while the fetch goes on. */
@@ -99,8 +102,18 @@ type Phase =
   | { name: "error"; message: string };
 
 export default function BankSyncModal({ onClose }: Props) {
-  const { connections, connectionsLoaded, syncingId, isSyncing, syncNow, connect, disconnect, setStartDate: saveStartDate } =
-    useBankSync();
+  const {
+    connections,
+    connectionsLoaded,
+    syncingId,
+    isSyncing,
+    isQueued,
+    syncNow,
+    connect,
+    disconnect,
+    setStartDate: saveStartDate,
+  } = useBankSync();
+  const queueAbort = useRef<AbortController | null>(null);
   const { settings, updateSettings } = useSettings();
 
   // null = decide from data: the accounts list when something is connected.
@@ -115,7 +128,8 @@ export default function BankSyncModal({ onClose }: Props) {
   const [elapsed, setElapsed] = useState(0);
 
   const institution = findInstitution(companyId) ?? INSTITUTIONS[0];
-  const loading = phase.name === "loading" || phase.name === "verifying";
+  const loading = phase.name === "loading" || phase.name === "verifying" || phase.name === "queued";
+  const runningLabel = findInstitution(connections.find((c) => c.id === syncingId)?.companyId ?? "")?.label;
   const bounds = startDateBounds();
   const canSubmit =
     institution.fields.every((f) => (values[f] ?? "").trim().length > 0) &&
@@ -130,13 +144,16 @@ export default function BankSyncModal({ onClose }: Props) {
     return () => clearTimeout(t);
   }, [phase.name, onClose]);
 
-  // Seconds counter shown under the spinners.
+  // Seconds counter shown under the spinners; restarts when the queue reaches the login.
   useEffect(() => {
     if (!loading) return;
     setElapsed(0);
     const t = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(t);
-  }, [loading]);
+  }, [loading, phase.name]);
+
+  // Closing the dialog while queued cancels that login (it never started).
+  useEffect(() => () => queueAbort.current?.abort(), []);
 
   // Escape closes the modal, except mid-login (saved-connection syncs keep
   // running in the background, so they don't block closing).
@@ -174,15 +191,26 @@ export default function BankSyncModal({ onClose }: Props) {
 
     try {
       if (remember) {
+        const abort = new AbortController();
+        queueAbort.current = abort;
         // Resolves once the bank accepts the login; the same session then
         // fetches the transactions in the background (a notice reports it).
-        await connect(companyId, credentials, startDate);
+        // If another sync is running, it waits its turn first.
+        await connect(companyId, credentials, startDate, {
+          signal: abort.signal,
+          onQueued: () => setPhase({ name: "queued" }),
+          onStart: () => {
+            queueAbort.current = null; // past the queue: the login can't be cancelled any more
+            setPhase({ name: "verifying" });
+          },
+        });
         setPhase({ name: "verified" });
         return;
       }
       const result = await syncBankTransactions(companyId, credentials, startDate);
       setPhase({ name: "success", result });
     } catch (err) {
+      if (err instanceof ConnectCancelledError) return; // the user cancelled while queued
       const code = err instanceof BankSyncError ? err.code : "INTERNAL_ERROR";
       const details = err instanceof BankSyncError ? err.details : undefined;
       setPhase({
@@ -191,6 +219,12 @@ export default function BankSyncModal({ onClose }: Props) {
         message: remember ? loginErrorMessage(code, details) : syncErrorMessage(code, details),
       });
     }
+  }
+
+  function cancelQueued() {
+    queueAbort.current?.abort();
+    queueAbort.current = null;
+    setPhase({ name: "form" });
   }
 
   const title = currentView === "list" ? "חשבונות מחוברים" : "חיבור חשבון בנק / אשראי";
@@ -235,6 +269,7 @@ export default function BankSyncModal({ onClose }: Props) {
                     key={c.id}
                     connection={c}
                     syncing={isSyncing(c)}
+                    queued={isQueued(c)}
                     anotherSyncing={syncingId !== null && syncingId !== c.id}
                     onSync={() => syncNow(c.id)}
                     onUpdateCredentials={() => openForm(c.companyId)}
@@ -274,6 +309,25 @@ export default function BankSyncModal({ onClose }: Props) {
           {/* ══ Connect / one-off sync form ══════════════════════════ */}
           {currentView === "form" && (
             <>
+              {/* ── Queued behind another sync (one bank login at a time) ─ */}
+              {phase.name === "queued" && (
+                <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
+                  <div className="mb-4 h-10 w-10 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center">
+                    <Clock className="h-5 w-5 text-slate-500" aria-hidden="true" />
+                  </div>
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">{QUEUED_LABEL}</p>
+                  <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+                    {runningLabel ? `סנכרון ${runningLabel} פועל כעת.` : "סנכרון אחר פועל כעת."}
+                    <br />
+                    ההתחברות ל{institution.label} תתחיל אוטומטית מיד בסיומו.
+                  </p>
+                  <p className="text-xs text-slate-400 mt-3 tabular-nums" dir="ltr">{elapsed}s</p>
+                  <button type="button" onClick={cancelQueued} className={`mt-5 w-full ${secondaryButton}`}>
+                    ביטול
+                  </button>
+                </div>
+              )}
+
               {/* ── Connecting: waiting for the bank to accept the login ─ */}
               {phase.name === "verifying" && (
                 <div className="flex flex-col items-center text-center py-6" role="status" aria-live="polite">
@@ -490,6 +544,7 @@ export default function BankSyncModal({ onClose }: Props) {
 function ConnectionCard({
   connection,
   syncing,
+  queued,
   anotherSyncing,
   onSync,
   onUpdateCredentials,
@@ -498,6 +553,8 @@ function ConnectionCard({
 }: {
   connection: BankConnection;
   syncing: boolean;
+  /** Waiting for the sync that's running now (one bank login at a time). */
+  queued: boolean;
   anotherSyncing: boolean;
   onSync: () => void;
   onUpdateCredentials: () => void;
@@ -577,13 +634,22 @@ function ConnectionCard({
             {institution?.label ?? connection.companyId}{" "}
             <span className="text-xs font-normal text-slate-400 tabular-nums" dir="ltr">{connection.maskedLogin}</span>
           </p>
-          <p className="flex items-center gap-1.5 text-xs mt-0.5" role={inProgress ? "status" : undefined} aria-live="polite">
-            {inProgress ? (
-              <Loader2 className="h-3 w-3 shrink-0 animate-spin text-teal-600" aria-hidden="true" />
+          <p className="flex items-center gap-1.5 text-xs mt-0.5" role={inProgress || queued ? "status" : undefined} aria-live="polite">
+            {queued && !syncing ? (
+              <>
+                <Clock className="h-3 w-3 shrink-0 text-slate-500" aria-hidden="true" />
+                <span className="text-slate-600 dark:text-slate-300 font-semibold">{QUEUED_LABEL}</span>
+              </>
             ) : (
-              <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`} />
+              <>
+                {inProgress ? (
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin text-teal-600" aria-hidden="true" />
+                ) : (
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${dotClass}`} />
+                )}
+                <span className={stateClass}>{inProgress ? stateMeta.label : <>סטטוס: {stateMeta.label}</>}</span>
+              </>
             )}
-            <span className={stateClass}>{inProgress ? stateMeta.label : <>סטטוס: {stateMeta.label}</>}</span>
           </p>
           <p className="text-[11px] text-slate-400 mt-0.5">
             {connection.lastSyncAt ? (
@@ -696,11 +762,11 @@ function ConnectionCard({
             <button
               type="button"
               onClick={onSync}
-              disabled={syncing || anotherSyncing}
+              disabled={syncing || queued}
               className="flex-1 inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 text-white px-4 py-2.5 text-sm font-semibold shadow-sm hover:bg-amber-600 transition-colors disabled:opacity-40 disabled:cursor-not-allowed min-h-[44px]"
             >
-              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              {syncing ? "מסנכרן…" : "נסה שוב"}
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : queued ? <Clock className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
+              {syncing ? "מסנכרן…" : queued ? "בתור…" : "נסה שוב"}
             </button>
             <button
               type="button"
@@ -715,11 +781,12 @@ function ConnectionCard({
           <button
             type="button"
             onClick={onSync}
-            disabled={syncing || anotherSyncing}
+            disabled={syncing || queued}
             className={`flex-1 inline-flex items-center justify-center gap-2 ${primaryButton}`}
+            title={anotherSyncing && !queued ? "סנכרון אחר פועל — הסנכרון יתווסף לתור" : undefined}
           >
-            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {syncing ? "מסנכרן…" : "סנכרן עכשיו"}
+            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : queued ? <Clock className="h-4 w-4" /> : <RefreshCw className="h-4 w-4" />}
+            {syncing ? "מסנכרן…" : queued ? "בתור…" : anotherSyncing ? "הוסף לתור" : "סנכרן עכשיו"}
           </button>
         )}
         {confirmDisconnect ? (

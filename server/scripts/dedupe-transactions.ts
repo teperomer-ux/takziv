@@ -74,6 +74,8 @@ async function main() {
         amount: Number(data.amount ?? 0),
         description: String(data.description ?? ""),
         source: typeof data.source === "string" ? data.source : undefined,
+        billingMonth: typeof data.billingMonth === "number" ? data.billingMonth : undefined,
+        billingYear: typeof data.billingYear === "number" ? data.billingYear : undefined,
         synced: data.importedFrom === "bank-sync",
         category: String(data.category ?? ""),
         subCategory: String(data.subCategory ?? ""),

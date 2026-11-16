@@ -88,6 +88,8 @@ export async function saveNewTransactions(
         billingMonth: tx.billingMonth,
         billingYear: tx.billingYear,
         ...(tx.source && { source: tx.source }),
+        ...(tx.installment && { installmentNumber: tx.installment.number, installmentTotal: tx.installment.total }),
+        ...(tx.original && { originalAmount: tx.original.amount, originalCurrency: tx.original.currency }),
         userId,
         importedFrom: "bank-sync",
         importedAt: Timestamp.now(),
@@ -129,6 +131,12 @@ async function readRowsInRange(col: CollectionReference, txs: MappedTransaction[
       amount: Number(data.amount ?? 0),
       description: String(data.description ?? ""),
       source: typeof data.source === "string" ? data.source : undefined,
+      billingMonth: typeof data.billingMonth === "number" ? data.billingMonth : undefined,
+      billingYear: typeof data.billingYear === "number" ? data.billingYear : undefined,
+      installment:
+        typeof data.installmentNumber === "number" && typeof data.installmentTotal === "number"
+          ? `${data.installmentNumber}/${data.installmentTotal}`
+          : undefined,
     };
   });
 }
