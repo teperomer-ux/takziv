@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, Fragment } from "react";
-import { Trash2, RefreshCw, X, Check, Sparkles } from "lucide-react";
+import { Trash2, RefreshCw, X, Check, Sparkles, Repeat } from "lucide-react";
 import type { Transaction, TransactionSource } from "../types";
 import { useCategories } from "../hooks/useCategories";
+import { useSettings } from "../hooks/useSettings";
+import { isExcludedFromTotals } from "../utils/internalTransfers";
+import { merchantKey } from "../utils/recurringBills";
 import { isUncategorized, byUncategorizedThenDate } from "../utils/categoryStatus";
 import { formatDate } from "../utils/formatDate";
 import { SOURCE_LABELS } from "../utils/bankReconciliation";
@@ -33,6 +36,13 @@ interface Props {
 }
 
 const ADD_NEW = "__add_new__";
+
+type SourceFilter = "all" | "card" | "bank";
+const SOURCE_FILTERS: { id: SourceFilter; label: string }[] = [
+  { id: "all", label: "הכל" },
+  { id: "card", label: "כרטיסי אשראי" },
+  { id: "bank", label: "חשבון הבנק" },
+];
 
 /**
  * Light-background palette per provider. Each entry pairs a tinted surface
@@ -67,7 +77,26 @@ export default function TransactionList({
   filterUncategorized = false,
   onClearFilter,
 }: Props) {
-  const { categories, categoryNames, addCategory, addSubCategory } = useCategories();
+  const { categories, categoryNames, addCategory, addSubCategory, excludedCategories } = useCategories();
+  const { settings, updateSettings } = useSettings();
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+
+  // ── Fixed-charge marking ─────────────────────────────────────────
+  // The user's own say on what is a fixed charge; it overrides the detection.
+  const fixedMerchants = useMemo(() => new Set(settings.fixedMerchants), [settings.fixedMerchants]);
+  const toggleFixed = useCallback(
+    (description: string) => {
+      const key = merchantKey(description);
+      if (!key) return;
+      const marked = settings.fixedMerchants.includes(key);
+      updateSettings({
+        fixedMerchants: marked ? settings.fixedMerchants.filter((k) => k !== key) : [...settings.fixedMerchants, key],
+        // Marking it fixed withdraws an earlier "not fixed".
+        notFixedMerchants: settings.notFixedMerchants.filter((k) => k !== key),
+      }).catch((err) => console.error("[TransactionList] saving fixed marking failed:", err));
+    },
+    [settings.fixedMerchants, settings.notFixedMerchants, updateSettings],
+  );
 
   // Track which transaction is adding a new category/sub
   const [addingCatFor, setAddingCatFor] = useState<string | null>(null);
@@ -158,24 +187,24 @@ export default function TransactionList({
 
   const monthLabel = `${MONTH_NAMES[month - 1]} ${year}`;
 
-  // ── CC-only guard ────────────────────────────────────────────────
-  // This view is the "כרטיסי אשראי" tab — strictly credit-card rows.
-  // The parent (`App.tsx`) already passes a pre-filtered slice, but we
-  // re-apply the filter here so the component is self-protective: any
-  // future call site that hands us the unfiltered union won't leak
-  // עו״ש rows (source === "bank") into the CC list, its header count,
-  // empty-state, or any downstream sum derived from this array.
-  // Legacy rows (`source === undefined`) predate the field — they came
-  // from the CC uploader before tagging existed, so they count as CC.
-  const creditCardOnly = useMemo(
-    () => transactions.filter((tx) => tx.source !== "bank"),
-    [transactions],
+  // ── Every expense of the month ───────────────────────────────────
+  // Card purchases AND direct bank debits (mortgage, standing orders, fees,
+  // cash). Legacy rows without a source came from the old card uploader, so
+  // they count as card rows.
+  const bankCount = useMemo(() => transactions.filter((tx) => tx.source === "bank").length, [transactions]);
+  const hasBothSources = bankCount > 0 && bankCount < transactions.length;
+  const bySource = useMemo(
+    () =>
+      sourceFilter === "all" || !hasBothSources
+        ? transactions
+        : transactions.filter((tx) => (tx.source === "bank") === (sourceFilter === "bank")),
+    [transactions, sourceFilter, hasBothSources],
   );
 
   const displayedTransactions = useMemo(() => {
     const base = filterUncategorized
-      ? creditCardOnly.filter((tx) => isUncategorized(tx.category))
-      : creditCardOnly;
+      ? bySource.filter((tx) => isUncategorized(tx.category))
+      : bySource;
     // Copy before sorting so we never mutate the parent array.
     // Drafts (new synced rows awaiting approval) come first, then within each
     // group uncategorized rows float up, newest date first.
@@ -184,7 +213,7 @@ export default function TransactionList({
       const bDraft = b.status === "draft" ? 0 : 1;
       return aDraft - bDraft || byUncategorizedThenDate(a, b);
     });
-  }, [creditCardOnly, filterUncategorized]);
+  }, [bySource, filterUncategorized]);
 
   const draftCount = useMemo(
     () => displayedTransactions.filter((tx) => tx.status === "draft").length,
@@ -211,11 +240,11 @@ export default function TransactionList({
     [onUpdate],
   );
 
-  if (creditCardOnly.length === 0) {
+  if (transactions.length === 0) {
     return (
       <>
         <div className="rounded-2xl bg-white dark:bg-slate-900 p-8 text-center border border-slate-200/60 dark:border-slate-700/60">
-          <p className="text-slate-400 mb-4">אין עסקאות להצגה.</p>
+          <p className="text-slate-400 mb-4">אין הוצאות ב{monthLabel}.</p>
           <button
             onClick={() => setSyncOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl bg-primary text-white px-5 py-2.5 text-sm font-semibold shadow-sm hover:bg-primary/90 transition-colors min-h-[44px]"
@@ -241,7 +270,7 @@ export default function TransactionList({
       {/* ── Month header with sync + delete buttons ───────────── */}
       <div className="flex items-center justify-between mb-4 px-1">
         <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">
-          הוצאות — {monthLabel} ({displayedTransactions.length}{filterUncategorized ? `/${creditCardOnly.length}` : ""})
+          הוצאות — {monthLabel} ({displayedTransactions.length}{displayedTransactions.length !== transactions.length ? `/${transactions.length}` : ""})
         </h2>
 
         <div className="flex items-center gap-1">
@@ -307,6 +336,30 @@ export default function TransactionList({
         </button>
       </div>
 
+      {/* ── Source filter: cards / bank account ──────────────────── */}
+      {hasBothSources && (
+        <div className="flex gap-2 mb-4 overflow-x-auto scrollbar-hide" role="group" aria-label="סינון לפי מקור">
+          {SOURCE_FILTERS.map((f) => {
+            const active = sourceFilter === f.id;
+            const count = f.id === "all" ? transactions.length : f.id === "bank" ? bankCount : transactions.length - bankCount;
+            return (
+              <button
+                key={f.id}
+                onClick={() => setSourceFilter(f.id)}
+                aria-pressed={active}
+                className={`shrink-0 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  active
+                    ? "bg-primary text-white border-primary"
+                    : "bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-slate-300"
+                }`}
+              >
+                {f.label} <span className={active ? "text-white/70" : "text-slate-400"}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* ── Filter banner ────────────────────────────────────────── */}
       {filterUncategorized && (
         <div className="flex items-center justify-between rounded-2xl bg-blue-50 dark:bg-blue-950/30 border border-blue-200/60 dark:border-blue-700/40 px-4 py-3 mb-4">
@@ -335,6 +388,8 @@ export default function TransactionList({
         {displayedTransactions.map((tx, idx) => {
           const isDraft = tx.status === "draft";
           const needsCategory = isUncategorized(tx.category);
+          const excluded = isExcludedFromTotals(tx.category, excludedCategories);
+          const markedFixed = fixedMerchants.has(merchantKey(tx.description));
           return (
           <Fragment key={tx.id}>
           {/* ── Group headers: new drafts on top, reviewed rows below ── */}
@@ -369,6 +424,11 @@ export default function TransactionList({
                 {formatDate(tx.date)}
               </span>
               <SourceBadge source={tx.source} />
+              {(tx.installmentTotal ?? 0) > 1 && (
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  תשלום {tx.installmentNumber ?? "?"}/{tx.installmentTotal}
+                </span>
+              )}
               <span
                 className="flex-1 min-w-0 text-sm font-medium text-slate-800 dark:text-slate-200 break-words leading-snug cursor-default pointer-events-none"
               >
@@ -378,6 +438,11 @@ export default function TransactionList({
 
             {/* Row 2: status + amount + delete (right-aligned in RTL) */}
             <div className="flex items-center justify-end gap-2 mb-3">
+              {excluded && (
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                  לא נספר בהוצאות
+                </span>
+              )}
               <span
                 className={`text-[10px] font-semibold px-2 py-0.5 rounded-full whitespace-nowrap ${
                   isDraft
@@ -401,6 +466,21 @@ export default function TransactionList({
                 )}
                 {tx.amount.toLocaleString("he-IL")} ₪
               </span>
+              {tx.amount > 0 && tx.description && (
+                <button
+                  onClick={() => toggleFixed(tx.description)}
+                  aria-pressed={markedFixed}
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    markedFixed
+                      ? "text-primary bg-primary/10"
+                      : "text-slate-300 hover:text-primary hover:bg-primary/5"
+                  }`}
+                  aria-label={markedFixed ? "בטל סימון כחיוב קבוע" : "סמן כחיוב קבוע"}
+                  title={markedFixed ? "מסומן כחיוב קבוע — לחצו לביטול" : "סמן כחיוב קבוע"}
+                >
+                  <Repeat className="h-4 w-4" />
+                </button>
+              )}
               <button
                 onClick={() =>
                   setPendingDelete({

@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useCallback, useEffect, lazy, Suspense } from "react";
-import { Settings, LogOut, Loader2, X } from "lucide-react";
+import { Settings, LogOut, Loader2, X, CalendarClock } from "lucide-react";
 import BottomNav, { type Tab } from "./components/BottomNav";
 import Dashboard from "./components/Dashboard";
 import TransactionList from "./components/TransactionList";
@@ -17,6 +17,8 @@ import { institutionLabel } from "./constants/institutions";
 import { useAuth } from "./hooks/useAuth";
 import { getUidOrNull } from "./lib/firebase";
 import { saveMapping, applyMappingToUncategorized } from "./services/mappingService";
+import { defaultViewMonth, fromMonthIndex, monthIndex, splitFutureCharges } from "./utils/billingCycle";
+import { israelYmd } from "./utils/formatDate";
 import type { Transaction } from "./types";
 
 // The assistant (chat UI, Gemini client, query tools) loads in its own chunk;
@@ -128,24 +130,25 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
     useTransactions();
   const incomeTx = useIncomeTransactions();
 
-  // ── Source split ──────────────────────────────────────────────
-  // `transactions` is the union of synced card + עו״ש rows for the active
-  // month. The three views consume strictly different slices:
+  // ── The three tabs ────────────────────────────────────────────
+  //   • Dashboard       ("ראשי")    → the month's expenses + its incomes
+  //   • TransactionList ("הוצאות")  → every expense: card purchases and
+  //                                   direct bank debits
+  //   • IncomeList      ("הכנסות")  → incomes only (their own collection)
   //
-  //   • TransactionList ("כרטיסי אשראי")  → creditCardTransactions
-  //   • IncomeList      ("עובר ושב")      → incomeTx + bankTransactions
-  //   • Dashboard       ("ראשי")          → the full union (both combined)
-  //
-  // Legacy rows that predate `source` (undefined) count as credit-card —
-  // they were imported by the former CC file uploader before the field existed.
-  const creditCardTransactions = useMemo(
-    () => transactions.filter((tx) => tx.source !== "bank"),
-    [transactions],
+  // ── Billing-cycle boundary ────────────────────────────────────
+  // `transactions` is the viewed billing month. Card charges of a month
+  // that hasn't started yet (December's bill, seen in November) are future
+  // charges: hidden and uncounted until their month arrives, unless the user
+  // asks to see them.
+  const today = israelYmd(new Date());
+  const [showFuture, setShowFuture] = useState(false);
+  const { current: currentCharges, future: futureCharges } = useMemo(
+    () => splitFutureCharges(transactions, today),
+    [transactions, today],
   );
-  const bankTransactions = useMemo(
-    () => transactions.filter((tx) => tx.source === "bank"),
-    [transactions],
-  );
+  const shownTransactions = showFuture ? transactions : currentCharges;
+  const futureTotal = useMemo(() => futureCharges.reduce((sum, tx) => sum + tx.amount, 0), [futureCharges]);
 
   const updateExpense = useCategoryLearning(update, transactions, "learnedMappings", "transactions");
   const updateIncome = useCategoryLearning(
@@ -162,15 +165,27 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
   const syncingConnection = bankSync.connections.find((c) => c.id === bankSync.syncingId);
   const queuedCount = bankSync.connections.filter(bankSync.isQueued).length;
 
-  function prevMonth() {
-    if (month === 1) { setMonth(year - 1, 12); incomeTx.setMonth(year - 1, 12); }
-    else { setMonth(year, month - 1); incomeTx.setMonth(year, month - 1); }
-  }
+  const setIncomeMonth = incomeTx.setMonth;
+  const goToMonth = useCallback(
+    (y: number, m: number) => {
+      setMonth(y, m);
+      setIncomeMonth(y, m);
+      setShowFuture(false);
+    },
+    [setMonth, setIncomeMonth],
+  );
+  const stepMonth = (delta: number) => goToMonth(...fromMonthIndex(monthIndex(year, month) + delta));
+  const prevMonth = () => stepMonth(-1);
+  const nextMonth = () => stepMonth(1);
 
-  function nextMonth() {
-    if (month === 12) { setMonth(year + 1, 1); incomeTx.setMonth(year + 1, 1); }
-    else { setMonth(year, month + 1); incomeTx.setMonth(year, month + 1); }
-  }
+  // Open on the month the user prefers (Settings → מחזור חיוב), once per session.
+  const defaultMonthView = settingsCtx.settings.defaultMonthView;
+  const openedOnDefault = useRef(false);
+  useEffect(() => {
+    if (settingsCtx.loading || openedOnDefault.current) return;
+    openedOnDefault.current = true;
+    if (defaultMonthView === "previous") goToMonth(...defaultViewMonth(today, "previous"));
+  }, [settingsCtx.loading, defaultMonthView, today, goToMonth]);
 
   function handleShowUncategorized() {
     setFilterUncategorized(true);
@@ -255,6 +270,28 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
           </button>
         </div>
 
+        {/* Future charges: a billing cycle that hasn't started yet */}
+        {!loading && futureCharges.length > 0 && (
+          <div
+            role="status"
+            className="mb-4 flex items-start gap-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-3 text-sm text-slate-600 dark:text-slate-300"
+          >
+            <CalendarClock className="h-5 w-5 shrink-0 mt-0.5 text-slate-400" aria-hidden="true" />
+            <p className="flex-1 leading-relaxed">
+              {futureCharges.length === 1 ? "חיוב אשראי אחד" : `${futureCharges.length} חיובי אשראי`} (
+              <span className="tabular-nums">{Math.round(futureTotal).toLocaleString("he-IL")} ₪</span>) שייכים למחזור
+              של {MONTH_NAMES[month - 1]}, שעוד לא התחיל.{" "}
+              {showFuture ? "הם מוצגים כעת, אך לא נכנסים לממוצעים ולתובנות." : "הם יופיעו כשהחודש יגיע."}
+            </p>
+            <button
+              onClick={() => setShowFuture((v) => !v)}
+              className="shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+            >
+              {showFuture ? "הסתר" : "הצג בכל זאת"}
+            </button>
+          </div>
+        )}
+
         {/* Bank sync notice (background result / needs attention) */}
         {bankSync.notice && (
           <div
@@ -305,12 +342,13 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
                 transactions={transactions}
                 year={year}
                 month={month}
+                showFuture={showFuture}
                 onShowUncategorized={handleShowUncategorized}
               />
             )}
             {tab === "expenses" && (
               <TransactionList
-                transactions={creditCardTransactions}
+                transactions={shownTransactions}
                 year={year}
                 month={month}
                 onUpdate={updateExpense}
@@ -323,9 +361,6 @@ function AuthenticatedApp({ signOut }: { signOut: () => Promise<void> }) {
             {tab === "incomes" && (
               <IncomeList
                 transactions={incomeTx.transactions}
-                bankTransactions={bankTransactions}
-                onBankDelete={remove}
-                onBankUpdate={updateExpense}
                 year={year}
                 month={month}
                 onUpdate={updateIncome}

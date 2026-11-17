@@ -64,6 +64,15 @@ function docToTransaction(
     billingMonth: (data.billingMonth as number) ?? fallbackM,
     billingYear: (data.billingYear as number) ?? fallbackY,
     source: normalizeSource(data.source),
+    ...(typeof data.installmentTotal === "number" && {
+      installmentNumber: typeof data.installmentNumber === "number" ? data.installmentNumber : undefined,
+      installmentTotal: data.installmentTotal,
+    }),
+    ...(typeof data.originalAmount === "number" &&
+      typeof data.originalCurrency === "string" && {
+        originalAmount: data.originalAmount,
+        originalCurrency: data.originalCurrency,
+      }),
   };
 }
 

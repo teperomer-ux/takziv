@@ -282,7 +282,7 @@ export function generateSavingsInsights(
   for (const charge of charges) {
     const cat = matchCategory(charge.description);
     if (!cat) continue;
-    const amount = Math.round(charge.amountM);
+    const amount = Math.round(charge.monthlyCost);
 
     // ── Telecom: MVNO alternative ───────────────────────────────────
     // Skill ref: Telecom Savings — Golan ~40, Rami Levy ~45, retention dept.

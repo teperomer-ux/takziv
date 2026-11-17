@@ -56,7 +56,7 @@ export default function BottomLine({
     return (
       <div className="rounded-2xl bg-white dark:bg-slate-900 border-2 border-dashed border-slate-200 dark:border-slate-700 p-6 mb-5 text-center">
         <p className="text-sm text-slate-500 mb-2">
-          העלו דף עו״ש בלשונית ״הכנסות״ כדי לראות את השורה התחתונה
+          עדיין אין הכנסות לחודש הזה. סנכרנו את חשבון הבנק כדי לראות את השורה התחתונה
         </p>
       </div>
     );

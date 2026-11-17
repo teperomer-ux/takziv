@@ -95,6 +95,26 @@ export async function deleteMonthIncomeTransactions(
   return snapshot.docs.length;
 }
 
+// ─── Session history cache ──────────────────────────────────────────────────
+// The savings profile needs every month's income. Read once per session and
+// again only after a bank sync (the month on screen comes from its listener).
+
+let incomeHistory: { uid: string; fetchedAt: number; promise: Promise<Transaction[]> } | null = null;
+
+/** Every income of the signed-in user; cached unless a bank sync finished after the last read. */
+export async function loadIncomeHistory(importedAt = 0): Promise<Transaction[]> {
+  const uid = getUidOrNull();
+  if (!uid) return [];
+  if (!incomeHistory || incomeHistory.uid !== uid || importedAt > incomeHistory.fetchedAt) {
+    const promise = getDocs(userCol()).then((snapshot) => snapshot.docs.map((d) => docToTransaction(d.id, d.data())));
+    incomeHistory = { uid, fetchedAt: Date.now(), promise };
+    promise.catch(() => {
+      if (incomeHistory?.promise === promise) incomeHistory = null;
+    });
+  }
+  return incomeHistory.promise;
+}
+
 // ─── Real-time listener ─────────────────────────────────────────────────────
 
 export function onIncomeTransactionsSnapshot(

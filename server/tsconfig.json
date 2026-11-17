@@ -21,6 +21,10 @@
     "../src/utils/descriptionKey.ts",
     "../src/utils/internalTransfers.ts",
     "../src/utils/bankReconciliation.ts",
-    "../src/utils/financeQueries.ts"
+    "../src/utils/financeQueries.ts",
+    "../src/utils/billingCycle.ts",
+    "../src/utils/recurringBills.ts",
+    "../src/utils/insights.ts",
+    "../src/utils/savingsProfile.ts"
   ]
 }

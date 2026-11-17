@@ -1,8 +1,7 @@
-import { useCallback, useState } from "react";
-import { Trash2, RefreshCw, Pencil } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
+import { Trash2, RefreshCw, Pencil, Search, X } from "lucide-react";
 import type { Transaction } from "../types";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
-import { useCategories } from "../hooks/useCategories";
 import BankSyncModal from "./BankSyncModal";
 import ConfirmDialog from "./ConfirmDialog";
 import { formatDate } from "../utils/formatDate";
@@ -14,45 +13,24 @@ const MONTH_NAMES = [
 ];
 
 interface Props {
-  /** Incomes only — lives in its own Firestore collection. */
+  /** The month's incomes — salaries, transfers in, refunds and other credits. */
   transactions: Transaction[];
-  /**
-   * Direct bank (עו״ש) EXPENSES for the month — mortgage, fees, standing
-   * orders, cash withdrawals, etc. They live in the shared transactions
-   * collection (same as CC rows) but are filtered to this view so the CC
-   * tab and the עו״ש tab don't double-list them.
-   */
-  bankTransactions: Transaction[];
   year: number;
   month: number;
   onUpdate: (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
   onDelete: (id: string) => void;
   onDeleteAll: () => Promise<number>;
-  /** Delete a bank-side transaction. Bank rows live in the main transactions
-   *  collection alongside CC rows, so this handler is the same one
-   *  TransactionList uses — not the income-collection delete. */
-  onBankDelete: (id: string) => void;
-  /** Update a bank-side transaction — the expense handler, so categorising
-   *  one teaches the expense classifier just like a card row. */
-  onBankUpdate: (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
 }
 
 const ADD_NEW = "__add_new__";
+/** Filter value for rows that have no category yet. */
+const UNCATEGORIZED = "__uncategorized__";
+const UNCATEGORIZED_LABEL = "ללא סיווג";
 
-export default function IncomeList({
-  transactions,
-  bankTransactions,
-  year,
-  month,
-  onUpdate,
-  onDelete,
-  onDeleteAll,
-  onBankDelete,
-  onBankUpdate,
-}: Props) {
+const ils = (n: number) => `${Math.round(n).toLocaleString("he-IL")} ₪`;
+
+export default function IncomeList({ transactions, year, month, onUpdate, onDelete, onDeleteAll }: Props) {
   const { categories, categoryNames, addCategory, addSubCategory, excludedCategories } = useIncomeCategories();
-  // Operating income vs. internal transfers, which the totals leave out.
-  const incomeSplit = splitTotals(transactions, excludedCategories);
 
   const [addingCatFor, setAddingCatFor] = useState<string | null>(null);
   const [addingSubFor, setAddingSubFor] = useState<string | null>(null);
@@ -68,6 +46,46 @@ export default function IncomeList({
   /** Income row waiting for the user to confirm its deletion. */
   const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
   const cancelDelete = useCallback(() => setPendingDelete(null), []);
+
+  /** null = everything; a category name; or UNCATEGORIZED. */
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+
+  // ── Income metrics ────────────────────────────────────────────────
+  // Operating income only: internal transfers (between own accounts, selling
+  // securities, …) are money the user already had, reported beside it.
+  const summary = useMemo(() => {
+    const split = splitTotals(transactions, excludedCategories);
+    const counted = transactions.filter((tx) => !isExcludedFromTotals(tx.category, excludedCategories));
+    const byCategory = new Map<string, { total: number; count: number }>();
+    for (const tx of counted) {
+      const key = tx.category || UNCATEGORIZED;
+      const entry = byCategory.get(key) ?? { total: 0, count: 0 };
+      entry.total += tx.amount;
+      entry.count++;
+      byCategory.set(key, entry);
+    }
+    const breakdown = [...byCategory.entries()]
+      .map(([key, v]) => ({ key, label: key === UNCATEGORIZED ? UNCATEGORIZED_LABEL : key, ...v }))
+      .sort((a, b) => b.total - a.total);
+    const largest = counted.reduce<Transaction | null>((top, tx) => (!top || tx.amount > top.amount ? tx : top), null);
+    return { split, countedRows: counted.length, breakdown, largest };
+  }, [transactions, excludedCategories]);
+
+  const displayed = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return transactions.filter((tx) => {
+      if (categoryFilter === UNCATEGORIZED ? tx.category !== "" : categoryFilter !== null && tx.category !== categoryFilter) {
+        return false;
+      }
+      return !needle || tx.description.toLowerCase().includes(needle);
+    });
+  }, [transactions, categoryFilter, search]);
+  const filtered = categoryFilter !== null || search.trim() !== "";
+  const displayedTotal = useMemo(
+    () => splitTotals(displayed, excludedCategories).counted,
+    [displayed, excludedCategories],
+  );
 
   function confirmDelete() {
     if (pendingDelete) onDelete(pendingDelete.id);
@@ -111,26 +129,26 @@ export default function IncomeList({
 
   const monthLabel = `${MONTH_NAMES[month - 1]} ${year}`;
 
-  // Empty state only when the whole עו״ש tab has nothing — no incomes AND no
-  // direct bank expenses. Otherwise we fall through and render whatever side
-  // has data (e.g. mortgage-only months with no incoming salary yet).
-  if (transactions.length === 0 && bankTransactions.length === 0) {
+  if (transactions.length === 0) {
     return (
       <>
         <div className="rounded-2xl bg-white dark:bg-slate-900 p-8 text-center border border-slate-200/60 dark:border-slate-700/60">
-          <p className="text-slate-400 mb-4">אין נתוני עו״ש להצגה.</p>
+          <p className="text-slate-500 dark:text-slate-400 mb-1">אין הכנסות ב{monthLabel}.</p>
+          <p className="text-xs text-slate-400 mb-4">משכורות, העברות נכנסות וזיכויים מיובאים אוטומטית מחשבון הבנק.</p>
           <button
             onClick={() => setSyncOpen(true)}
             className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 text-white px-5 py-2.5 text-sm font-semibold shadow-sm hover:bg-emerald-700 transition-colors min-h-[44px]"
           >
             <RefreshCw className="h-4 w-4" />
-            סנכרון חשבון בנק / אשראי
+            סנכרון חשבון בנק
           </button>
         </div>
         {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
       </>
     );
   }
+
+  const { split, breakdown, largest } = summary;
 
   return (
     <section>
@@ -152,16 +170,14 @@ export default function IncomeList({
 
       {/* Month header */}
       <div className="flex items-center justify-between mb-4 px-1">
-        <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">
-          עובר ושב — {monthLabel}
-        </h2>
+        <h2 className="text-base font-bold text-slate-800 dark:text-slate-100">הכנסות — {monthLabel}</h2>
 
         <div className="flex items-center gap-1">
           <button
             onClick={() => setSyncOpen(true)}
-            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-emerald-600 transition-colors p-2.5 rounded-xl hover:bg-emerald-50"
-            aria-label="סנכרון חשבון בנק / אשראי"
-            title="סנכרון חשבון בנק / אשראי"
+            className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-emerald-600 transition-colors p-2.5 rounded-xl hover:bg-emerald-50 dark:hover:bg-emerald-950/30"
+            aria-label="סנכרון חשבון בנק"
+            title="סנכרון חשבון בנק"
           >
             <RefreshCw className="h-4 w-4" />
             <span className="hidden sm:inline">סנכרון</span>
@@ -178,7 +194,7 @@ export default function IncomeList({
               </button>
               <button
                 onClick={() => setConfirmDeleteAll(false)}
-                className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 transition-colors min-h-[36px]"
+                className="rounded-xl border border-slate-200 dark:border-slate-700 px-4 py-2 text-xs font-medium text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors min-h-[36px]"
               >
                 ביטול
               </button>
@@ -186,7 +202,7 @@ export default function IncomeList({
           ) : (
             <button
               onClick={() => setConfirmDeleteAll(true)}
-              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-rose-500 transition-colors p-2.5 rounded-xl hover:bg-rose-50"
+              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-rose-500 transition-colors p-2.5 rounded-xl hover:bg-rose-50 dark:hover:bg-rose-950/30"
               aria-label="מחיקת כל ההכנסות לחודש זה"
               title="מחיקת כל ההכנסות לחודש זה"
             >
@@ -199,37 +215,126 @@ export default function IncomeList({
 
       {/* Confirmation banner */}
       {confirmDeleteAll && (
-        <div className="rounded-2xl bg-rose-50 border border-rose-200/60 px-4 py-3.5 mb-5 text-sm text-rose-700 font-medium">
+        <div className="rounded-2xl bg-rose-50 dark:bg-rose-950/30 border border-rose-200/60 dark:border-rose-800/40 px-4 py-3.5 mb-5 text-sm text-rose-700 dark:text-rose-300 font-medium">
           האם אתה בטוח שברצונך למחוק את כל ההכנסות לחודש {monthLabel}? פעולה זו תמחוק את הנתונים לצמיתות.
         </div>
       )}
 
-      {/* Summary: what counts as income, and what was only moved between own accounts */}
-      {transactions.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-2xl bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/40 px-4 py-3 mb-4 text-sm">
-          <span className="font-semibold text-emerald-800 dark:text-emerald-300">
-            הכנסה שוטפת: <span className="tabular-nums">{incomeSplit.counted.toLocaleString("he-IL")} ₪</span>
-          </span>
-          {incomeSplit.excluded > 0 && (
-            <>
-              <span aria-hidden="true" className="text-emerald-300 dark:text-emerald-700">·</span>
-              <span className="text-slate-500 dark:text-slate-400">
-                העברות פנימיות: <span className="tabular-nums">{incomeSplit.excluded.toLocaleString("he-IL")} ₪</span>
-              </span>
-            </>
-          )}
+      {/* ── Summary cards ──────────────────────────────────────── */}
+      <div className="rounded-2xl bg-gradient-to-bl from-emerald-600 to-teal-700 dark:from-emerald-800 dark:to-teal-900 p-5 text-white shadow-lg mb-3">
+        <p className="text-sm text-white/70 mb-1">סך ההכנסות ב{monthLabel}</p>
+        <p className="text-3xl font-bold tracking-tight tabular-nums">{ils(split.counted)}</p>
+        <p className="text-xs text-white/60 mt-1.5">
+          {summary.countedRows} {summary.countedRows === 1 ? "הכנסה" : "הכנסות"} · {breakdown.length}{" "}
+          {breakdown.length === 1 ? "מקור" : "מקורות"}
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 shadow-sm px-4 py-3">
+          <p className="text-[11px] text-slate-400 mb-0.5">ההכנסה הגדולה</p>
+          <p className="text-base font-bold text-slate-800 dark:text-slate-100 tabular-nums">{largest ? ils(largest.amount) : "—"}</p>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{largest?.description || "—"}</p>
+        </div>
+        {split.uncategorized > 0 ? (
+          <button
+            onClick={() => setCategoryFilter(UNCATEGORIZED)}
+            className="text-start rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/40 shadow-sm px-4 py-3 hover:bg-amber-100/60 dark:hover:bg-amber-950/50 transition-colors"
+          >
+            <p className="text-[11px] text-amber-700 dark:text-amber-400 mb-0.5">ממתינות לסיווג</p>
+            <p className="text-base font-bold text-amber-800 dark:text-amber-300 tabular-nums">{ils(split.uncategorized)}</p>
+            <p className="text-[11px] text-amber-700/80 dark:text-amber-400/80">לחצו כדי לסווג</p>
+          </button>
+        ) : (
+          <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 shadow-sm px-4 py-3">
+            <p className="text-[11px] text-slate-400 mb-0.5">העברות פנימיות</p>
+            <p className="text-base font-bold text-slate-800 dark:text-slate-100 tabular-nums">{ils(split.excluded)}</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">לא נספרות כהכנסה</p>
+          </div>
+        )}
+      </div>
+      {split.uncategorized > 0 && split.excluded > 0 && (
+        <p className="text-[11px] text-slate-500 dark:text-slate-400 -mt-2 mb-4 px-1">
+          העברות פנימיות (לא נספרות כהכנסה): <span className="tabular-nums">{ils(split.excluded)}</span>
+        </p>
+      )}
+
+      {/* ── Breakdown by source — tap a row to filter the list ─── */}
+      {breakdown.length > 0 && split.counted > 0 && (
+        <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 shadow-sm px-4 py-3.5 mb-4">
+          <h3 className="text-xs font-bold text-slate-500 dark:text-slate-400 mb-2.5">פילוח לפי מקור הכנסה</h3>
+          <div className="space-y-2.5">
+            {breakdown.map((row) => {
+              const share = Math.max(0, Math.min(100, (row.total / split.counted) * 100));
+              const active = categoryFilter === row.key;
+              return (
+                <button
+                  key={row.key}
+                  onClick={() => setCategoryFilter(active ? null : row.key)}
+                  aria-pressed={active}
+                  className={`block w-full text-start rounded-lg px-1.5 py-1 -mx-1.5 transition-colors ${
+                    active ? "bg-emerald-50 dark:bg-emerald-950/30" : "hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                  }`}
+                >
+                  <div className="flex items-baseline justify-between gap-2 text-sm">
+                    <span className={`truncate font-medium ${row.key === UNCATEGORIZED ? "text-amber-700 dark:text-amber-400" : "text-slate-700 dark:text-slate-200"}`}>
+                      {row.label}
+                      <span className="text-[11px] font-normal text-slate-400"> · {row.count}</span>
+                    </span>
+                    <span className="shrink-0 tabular-nums text-slate-700 dark:text-slate-200">
+                      {ils(row.total)} <span className="text-[11px] text-slate-400">({Math.round(share)}%)</span>
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1.5 rounded-full bg-slate-100 dark:bg-slate-800 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full ${row.key === UNCATEGORIZED ? "bg-amber-400" : "bg-emerald-500"}`}
+                      style={{ width: `${share}%` }}
+                    />
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
-      {/* Credits and debits are listed separately: incomes here, bank expenses below */}
-      <div className="flex items-center justify-between mb-3 px-1">
-        <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-400">
-          הכנסות ({transactions.length})
-        </h3>
+      {/* ── Search + active filter ─────────────────────────────── */}
+      <div className="relative mb-3">
+        <Search className="pointer-events-none absolute top-1/2 -translate-y-1/2 start-3 h-4 w-4 text-slate-400" />
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="חיפוש לפי תיאור..."
+          aria-label="חיפוש הכנסות לפי תיאור"
+          className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 dark:text-slate-200 ps-9 pe-3 py-2.5 text-sm focus:outline-none focus:border-emerald-500"
+        />
       </div>
 
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-400">
+          {filtered ? `מוצגות ${displayed.length} מתוך ${transactions.length}` : `כל ההכנסות (${transactions.length})`}
+          {filtered && displayed.length > 0 && <span className="font-medium tabular-nums"> · {ils(displayedTotal)}</span>}
+        </h3>
+        {filtered && (
+          <button
+            onClick={() => { setCategoryFilter(null); setSearch(""); }}
+            className="flex items-center gap-1 text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+          >
+            <X className="h-3.5 w-3.5" />
+            נקה סינון
+          </button>
+        )}
+      </div>
+
+      {displayed.length === 0 && (
+        <p className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 px-4 py-6 text-center text-sm text-slate-400">
+          אין הכנסות שתואמות את הסינון.
+        </p>
+      )}
+
       <div className="space-y-3">
-        {transactions.map((tx) => {
+        {displayed.map((tx) => {
           const excluded = isExcludedFromTotals(tx.category, excludedCategories);
           return (
           <div
@@ -306,7 +411,7 @@ export default function IncomeList({
                         if (e.key === "Enter") handleAddCategory(tx.id);
                         if (e.key === "Escape") { setAddingCatFor(null); setNewCatName(""); }
                       }}
-                      className="min-w-0 flex-1 rounded-lg border border-emerald-500 bg-white px-2 py-1.5 text-sm"
+                      className="min-w-0 flex-1 rounded-lg border border-emerald-500 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
                       placeholder="שם סעיף חדש..."
                       autoFocus
                     />
@@ -318,7 +423,7 @@ export default function IncomeList({
                     </button>
                     <button
                       onClick={() => { setAddingCatFor(null); setNewCatName(""); }}
-                      className="shrink-0 rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-500"
+                      className="shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 px-2 py-1.5 text-xs text-slate-500"
                     >
                       ביטול
                     </button>
@@ -336,6 +441,7 @@ export default function IncomeList({
                       const subs = categories[e.target.value];
                       onUpdate(tx.id, "subCategory", subs?.[0] ?? "");
                     }}
+                    aria-label="מקור הכנסה"
                     className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm appearance-none"
                   >
                     <option value="">סעיף</option>
@@ -358,7 +464,7 @@ export default function IncomeList({
                         if (e.key === "Enter") handleAddSubCategory(tx.id, tx.category);
                         if (e.key === "Escape") { setAddingSubFor(null); setNewSubName(""); }
                       }}
-                      className="min-w-0 flex-1 rounded-lg border border-emerald-500 bg-white px-2 py-1.5 text-sm"
+                      className="min-w-0 flex-1 rounded-lg border border-emerald-500 bg-white dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm"
                       placeholder="שם תת סעיף חדש..."
                       autoFocus
                     />
@@ -370,7 +476,7 @@ export default function IncomeList({
                     </button>
                     <button
                       onClick={() => { setAddingSubFor(null); setNewSubName(""); }}
-                      className="shrink-0 rounded-lg border border-slate-200 px-2 py-1.5 text-xs text-slate-500"
+                      className="shrink-0 rounded-lg border border-slate-200 dark:border-slate-700 px-2 py-1.5 text-xs text-slate-500"
                     >
                       ביטול
                     </button>
@@ -387,6 +493,7 @@ export default function IncomeList({
                       }
                       onUpdate(tx.id, "subCategory", e.target.value);
                     }}
+                    aria-label="תת סעיף"
                     className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm appearance-none"
                   >
                     <option value="">תת סעיף</option>
@@ -418,9 +525,7 @@ export default function IncomeList({
                   className="text-slate-300 hover:text-danger transition-colors p-1.5"
                   aria-label="מחק הכנסה"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                  </svg>
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             </div>
@@ -428,169 +533,9 @@ export default function IncomeList({
           );
         })}
       </div>
-
-      {/* ── Bank-side expenses (עו״ש debits that aren't CC bill payments) ── */}
-      {bankTransactions.length > 0 && (
-        <BankExpensesSection
-          transactions={bankTransactions}
-          monthLabel={monthLabel}
-          onDelete={onBankDelete}
-          onUpdate={onBankUpdate}
-        />
-      )}
 
       {/* Bank Sync Modal */}
       {syncOpen && <BankSyncModal onClose={() => setSyncOpen(false)} />}
     </section>
-  );
-}
-
-// ─── Bank-expenses section ───────────────────────────────────────────────────
-// Lists every עו״ש debit row for the month — mortgage, fees, standing orders,
-// cash withdrawals — strictly the rows whose `source === "bank"` and which
-// passed the CC-bill filter in the parser. Renders below the incomes on the
-// "עובר ושב" tab so all bank-side activity lives in one place. CC purchases
-// never appear here; they have their own tab.
-
-interface BankExpensesSectionProps {
-  transactions: Transaction[];
-  monthLabel: string;
-  onDelete: (id: string) => void;
-  onUpdate: (id: string, field: keyof Omit<Transaction, "id">, value: string | number) => void;
-}
-
-function BankExpensesSection({
-  transactions,
-  monthLabel,
-  onDelete,
-  onUpdate,
-}: BankExpensesSectionProps) {
-  // Bank debits are expenses, so they use the expense categories, not the income ones.
-  const { categories, categoryNames, excludedCategories } = useCategories();
-  const expenseCategoryNames = categoryNames.filter((c) => c !== "מקורות הכנסה");
-  const [pendingDelete, setPendingDelete] = useState<Transaction | null>(null);
-  const cancelDelete = useCallback(() => setPendingDelete(null), []);
-  const sorted = [...transactions].sort((a, b) => b.date.localeCompare(a.date));
-  const totals = splitTotals(sorted, excludedCategories);
-
-  function confirmDelete() {
-    if (pendingDelete) onDelete(pendingDelete.id);
-    setPendingDelete(null);
-  }
-
-  return (
-    <div className="mt-6">
-      {pendingDelete && (
-        <ConfirmDialog title="האם למחוק הוצאה זו?" confirmLabel="כן, מחק" onConfirm={confirmDelete} onCancel={cancelDelete}>
-          {pendingDelete.description || "הוצאה ללא תיאור"} ·{" "}
-          <span className="font-semibold text-rose-600 whitespace-nowrap" dir="ltr">
-            −{pendingDelete.amount.toLocaleString("he-IL")} ₪
-          </span>
-        </ConfirmDialog>
-      )}
-
-      <div className="flex items-center justify-between mb-3 px-1">
-        <h3 className="text-sm font-bold text-rose-700 dark:text-rose-400">
-          הוצאות מהבנק — {monthLabel} ({sorted.length})
-        </h3>
-        <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 tabular-nums" dir="ltr">
-          {totals.counted.toLocaleString("he-IL")} ₪
-        </span>
-      </div>
-      {totals.excluded > 0 && (
-        <p className="text-[11px] text-slate-500 dark:text-slate-400 -mt-2 mb-3 px-1">
-          לא כולל העברות פנימיות: <span className="tabular-nums">{totals.excluded.toLocaleString("he-IL")} ₪</span>
-        </p>
-      )}
-
-      <div className="space-y-3">
-        {sorted.map((tx) => {
-          const excluded = isExcludedFromTotals(tx.category, excludedCategories);
-          return (
-          <div
-            key={tx.id}
-            className={`rounded-2xl p-4 shadow-sm border ${
-              excluded
-                ? "bg-slate-50 dark:bg-slate-900/50 border-dashed border-slate-300 dark:border-slate-700"
-                : "bg-white dark:bg-slate-900 border-rose-200/60 dark:border-rose-900/40"
-            }`}
-          >
-            <div className="flex items-baseline gap-2 mb-2 select-text">
-              <span
-                className="shrink-0 text-xs sm:text-sm text-slate-500 dark:text-slate-400 tabular-nums"
-                dir="ltr"
-              >
-                {tx.date}
-              </span>
-              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
-                בנק
-              </span>
-              {excluded && (
-              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-md whitespace-nowrap bg-slate-200/70 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                לא נספר בהוצאות
-              </span>
-              )}
-              <span className="flex-1 min-w-0 text-sm font-medium text-slate-800 dark:text-slate-200 break-words leading-snug">
-                {tx.description || "—"}
-              </span>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 mb-3">
-              <div className="flex items-center gap-2 shrink-0">
-                <span className={`font-bold text-sm tabular-nums ${excluded ? "text-slate-400" : "text-rose-600"}`} dir="ltr">
-                  −{tx.amount.toLocaleString("he-IL")} ₪
-                </span>
-                <button
-                  onClick={() => setPendingDelete(tx)}
-                  className="text-slate-300 hover:text-danger transition-colors p-1"
-                  aria-label="מחק הוצאה מהבנק"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            {/* Category + sub-category — choosing one also teaches the classifier */}
-            <div className="flex gap-2">
-              <select
-                value={tx.category}
-                onChange={(e) => {
-                  onUpdate(tx.id, "category", e.target.value);
-                  onUpdate(tx.id, "subCategory", categories[e.target.value]?.[0] ?? "");
-                }}
-                aria-label="סעיף הוצאה"
-                className="flex-1 min-w-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm appearance-none"
-              >
-                <option value="">סעיף</option>
-                {/* Keep an auto-assigned category visible even if it isn't in the user's list. */}
-                {tx.category && !expenseCategoryNames.includes(tx.category) && (
-                  <option value={tx.category}>{tx.category}</option>
-                )}
-                {expenseCategoryNames.map((cat) => (
-                  <option key={cat} value={cat}>{cat}</option>
-                ))}
-              </select>
-              <select
-                value={tx.subCategory}
-                onChange={(e) => onUpdate(tx.id, "subCategory", e.target.value)}
-                aria-label="תת סעיף הוצאה"
-                className="flex-1 min-w-0 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 dark:text-slate-200 px-2 py-1.5 text-sm appearance-none"
-              >
-                <option value="">תת סעיף</option>
-                {tx.subCategory && !(categories[tx.category] ?? []).includes(tx.subCategory) && (
-                  <option value={tx.subCategory}>{tx.subCategory}</option>
-                )}
-                {(categories[tx.category] ?? []).map((sub) => (
-                  <option key={sub} value={sub}>{sub}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-          );
-        })}
-      </div>
-    </div>
   );
 }

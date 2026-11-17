@@ -26,4 +26,10 @@ export interface Transaction {
    * imported before this field existed leave it undefined.
    */
   source?: TransactionSource;
+  /** Payment n of an installment plan (bank sync only). */
+  installmentNumber?: number;
+  installmentTotal?: number;
+  /** The price in the original currency, for a foreign-currency charge (bank sync only). */
+  originalAmount?: number;
+  originalCurrency?: string;
 }

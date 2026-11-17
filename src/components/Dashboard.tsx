@@ -1,8 +1,22 @@
 import { useState, useEffect, useMemo, lazy, Suspense } from "react";
 import type { Transaction } from "../types";
+import { X } from "lucide-react";
 import { loadTransactionHistory, mergeMonthIntoHistory } from "../services/transactionService";
-import { onIncomeTransactionsSnapshot } from "../services/incomeTransactionService";
-import { calculateRecurringAndAlerts } from "../utils/recurringBills";
+import { loadIncomeHistory, onIncomeTransactionsSnapshot } from "../services/incomeTransactionService";
+import { detectRecurring, FIXED_KIND_LABELS } from "../utils/recurringBills";
+import { buildInsights } from "../utils/insights";
+import { buildSavingsProfile } from "../utils/savingsProfile";
+import {
+  cycleIndex,
+  cycleStatus,
+  daysInMonth,
+  fromMonthIndex,
+  isFutureCharge,
+  monthIndex,
+  parseYmd,
+  ymKey,
+} from "../utils/billingCycle";
+import { israelYmd } from "../utils/formatDate";
 import { matchCreditCardCompany } from "../utils/bankReconciliation";
 import {
   onAdditionalExpensesSnapshot,
@@ -15,10 +29,12 @@ import BottomLine from "./BottomLine";
 import SmartInsights from "./SmartInsights";
 import SmartSaverOnboarding from "./SmartSaverOnboarding";
 import SavingsInsightsList from "./SavingsInsightsList";
+import SavingsProfileCard from "./SavingsProfileCard";
 import BankSyncModal from "./BankSyncModal";
 import { useCategories } from "../hooks/useCategories";
 import { useIncomeCategories } from "../hooks/useIncomeCategories";
 import { useBankSync } from "../hooks/useBankSync";
+import { useSettings } from "../hooks/useSettings";
 import { isExcludedFromTotals, splitTotals } from "../utils/internalTransfers";
 
 // Recharts is most of the bundle; the charts load in their own chunk.
@@ -31,9 +47,12 @@ function ChartFallback() {
 }
 
 interface Props {
+  /** Every row of the viewed billing month, future charges included. */
   transactions: Transaction[];
   year: number;
   month: number;
+  /** The user asked to see the viewed month's future charges in its total. */
+  showFuture: boolean;
   onShowUncategorized: () => void;
 }
 
@@ -111,42 +130,49 @@ function aggregateBudgetSpending(
   return { spending, totalSpent, uncategorizedCount };
 }
 
-/** Compute per-category monthly averages from all historical transactions. */
-function computeAverages(allTxs: Transaction[], excludedCategories: ReadonlySet<string>): Map<string, number> {
-  const catMonths = new Map<string, Map<string, number>>();
+/** Complete months the "usual month" average is taken over. */
+const AVERAGE_MONTHS = 6;
+
+/**
+ * Per-category average of a usual month: the (up to) six billing months
+ * before the viewed one. The viewed month itself is left out — it would be
+ * compared with itself — and so are future charges (the caller removes them).
+ * A month in which a category had no spending counts as zero for it.
+ */
+function computeAverages(
+  allTxs: Transaction[],
+  excludedCategories: ReadonlySet<string>,
+  year: number,
+  month: number,
+): Map<string, number> {
+  const viewed = monthIndex(year, month);
+  const months = new Set<number>();
+  const totals = new Map<string, number>();
 
   for (const tx of allTxs) {
     if (tx.category === INCOME_CATEGORY || !tx.category) continue;
     if (isExcludedFromTotals(tx.category, excludedCategories)) continue;
     // Mirror the budget aggregator's safety net: bank-side CC bill rows are
-    // the lump-sum statement payment, not real category spending. Including
-    // them here would inflate the historical average for whichever category
-    // the user tagged the bank row with.
+    // the lump-sum statement payment, not real category spending.
     if (tx.source === "bank" && matchCreditCardCompany(tx.description)) continue;
-    const monthKey = tx.date.slice(0, 7);
-
-    let months = catMonths.get(tx.category);
-    if (!months) {
-      months = new Map();
-      catMonths.set(tx.category, months);
-    }
-    months.set(monthKey, (months.get(monthKey) ?? 0) + tx.amount);
+    const idx = cycleIndex(tx);
+    if (idx >= viewed || idx < viewed - AVERAGE_MONTHS) continue;
+    months.add(idx);
+    totals.set(tx.category, (totals.get(tx.category) ?? 0) + tx.amount);
   }
 
   const averages = new Map<string, number>();
-  for (const [cat, months] of catMonths) {
-    let total = 0;
-    for (const v of months.values()) total += v;
-    averages.set(cat, total / months.size);
-  }
+  for (const [cat, total] of totals) averages.set(cat, total / months.size);
   return averages;
 }
 
-export default function Dashboard({ transactions, year, month, onShowUncategorized }: Props) {
+export default function Dashboard({ transactions, year, month, showFuture, onShowUncategorized }: Props) {
   const { excludedCategories: excludedExpenseCategories } = useCategories();
   const { excludedCategories: excludedIncomeCategories } = useIncomeCategories();
   const { connections } = useBankSync();
+  const { settings, updateSettings } = useSettings();
   const [history, setHistory] = useState<Transaction[]>([]);
+  const [incomeHistory, setIncomeHistory] = useState<Transaction[]>([]);
   const [loadingAvg, setLoadingAvg] = useState(true);
   const [additionalExpenses, setAdditionalExpenses] = useState<AdditionalExpense[]>([]);
   const [incomeTransactions, setIncomeTransactions] = useState<Transaction[]>([]);
@@ -157,6 +183,8 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   const [financialProfile, setFinancialProfile] = useState<UserFinancialProfile>({
     ...DEFAULT_FINANCIAL_PROFILE,
   });
+  /** Today in Israel, YYYY-MM-DD — what "future charge" and "running month" are measured against. */
+  const today = israelYmd(new Date());
 
   // Load financial profile; auto-popup onboarding if empty
   useEffect(() => {
@@ -172,8 +200,8 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
     }).catch(() => {});
   }, []);
 
-  // Full history for averages / trend / recurring bills: read once per session
-  // (see loadTransactionHistory), again only after a bank sync finishes.
+  // Full history for averages / trend / fixed charges / savings profile: read
+  // once per session (see loadTransactionHistory), again only after a bank sync.
   const lastImportAt = useMemo(
     () => Math.max(0, ...connections.map((c) => (c.lastSyncAt ? Date.parse(c.lastSyncAt) : 0))),
     [connections],
@@ -188,6 +216,11 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
       .finally(() => {
         if (active) setLoadingAvg(false);
       });
+    loadIncomeHistory(lastImportAt)
+      .then((rows) => {
+        if (active) setIncomeHistory(rows);
+      })
+      .catch((err) => console.warn("[Dashboard] failed to load income history:", err));
     return () => {
       active = false;
     };
@@ -199,6 +232,17 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   const allTxs = useMemo(
     () => mergeMonthIntoHistory(year, month, transactions) ?? history,
     [history, year, month, transactions],
+  );
+
+  // ── Billing-cycle boundary ───────────────────────────────────────
+  // Card charges of a month that hasn't started yet are future charges:
+  // nothing below — averages, trend, fixed charges, insights, savings
+  // profile — ever sees them. The viewed month's own total shows them only
+  // when the user asked to (showFuture).
+  const visibleTxs = useMemo(() => allTxs.filter((tx) => !isFutureCharge(tx, today)), [allTxs, today]);
+  const monthRows = useMemo(
+    () => (showFuture ? transactions : transactions.filter((tx) => !isFutureCharge(tx, today))),
+    [transactions, showFuture, today],
   );
 
   // Subscribe to income transactions for current month
@@ -232,22 +276,89 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
   );
 
   const averages = useMemo(
-    () => computeAverages(allTxs, excludedExpenseCategories),
-    [allTxs, excludedExpenseCategories],
+    () => computeAverages(visibleTxs, excludedExpenseCategories, year, month),
+    [visibleTxs, excludedExpenseCategories, year, month],
   );
 
-  const { charges: recurringCharges, alerts: recurringAlerts } = useMemo(
-    () => calculateRecurringAndAlerts(allTxs, year, month),
-    [allTxs, year, month],
+  // ── Fixed charges ────────────────────────────────────────────────
+  const recurringOptions = useMemo(
+    () => ({
+      fixed: new Set(settings.fixedMerchants),
+      notFixed: new Set(settings.notFixedMerchants),
+      excludedCategories: excludedExpenseCategories,
+      today,
+    }),
+    [settings.fixedMerchants, settings.notFixedMerchants, excludedExpenseCategories, today],
   );
+  const recurring = useMemo(
+    () => detectRecurring(visibleTxs, year, month, recurringOptions),
+    [visibleTxs, year, month, recurringOptions],
+  );
+  const recurringCharges = recurring.charges;
+  const stoppedAlerts = recurring.alerts.filter((a) => a.kind === "stopped");
+
+  function markNotFixed(key: string) {
+    updateSettings({
+      notFixedMerchants: [...settings.notFixedMerchants.filter((k) => k !== key), key],
+      fixedMerchants: settings.fixedMerchants.filter((k) => k !== key),
+    }).catch((err) => console.error("[Dashboard] saving fixed marking failed:", err));
+  }
+
+  // ── Insights ─────────────────────────────────────────────────────
+  const insights = useMemo(
+    () =>
+      buildInsights({
+        history: visibleTxs,
+        year,
+        month,
+        today,
+        excludedCategories: excludedExpenseCategories,
+        recurring,
+      }),
+    [visibleTxs, year, month, today, excludedExpenseCategories, recurring],
+  );
+
+  // ── Savings profile ──────────────────────────────────────────────
+  // A property of the household, not of the viewed month: always built from
+  // the complete months before today.
+  const savingsProfile = useMemo(() => {
+    const [ty, tm] = parseYmd(today);
+    const lastComplete = monthIndex(ty, tm) - 1;
+    const [ly, lm] = fromMonthIndex(lastComplete);
+    const fixed = detectRecurring(visibleTxs, ly, lm, recurringOptions);
+    // The viewed month's incomes come from the live listener; the rest from the session read.
+    const incomes = new Map(incomeHistory.map((row) => [row.id, row]));
+    for (const row of incomeTransactions) incomes.set(row.id, row);
+    return buildSavingsProfile({
+      expenses: visibleTxs,
+      incomes: [...incomes.values()],
+      excludedExpenseCategories,
+      excludedIncomeCategories,
+      fixed,
+      manualExpensesFor: (idx) => expenseTotalForMonth(additionalExpenses, ...fromMonthIndex(idx)),
+      manualFixedMonthly: additionalExpenses
+        .filter((e) => e.kind === "recurring" && e.monthKey <= ymKey(ly, lm))
+        .reduce((sum, e) => sum + e.amount, 0),
+      today,
+    });
+  }, [
+    visibleTxs,
+    incomeHistory,
+    incomeTransactions,
+    excludedExpenseCategories,
+    excludedIncomeCategories,
+    additionalExpenses,
+    recurringOptions,
+    today,
+  ]);
 
   // Aggregate current-month spending per category — includes both detailed
   // credit-card rows and direct bank (עו״ש) rows, and defensively skips any
   // bank row that represents the lump-sum CC bill payment (those would
   // double-count the individual card purchases already in `transactions`).
   const { spending, totalSpent: txTotal, uncategorizedCount } = useMemo(
-    () => aggregateBudgetSpending(transactions, excludedExpenseCategories),
-    [transactions, excludedExpenseCategories],
+    () => aggregateBudgetSpending(monthRows, excludedExpenseCategories),
+    [monthRows, excludedExpenseCategories],
   );
   // Manually-added (one-off / recurring) expenses are kept in their own
   // collection and added on top of the transaction-driven total.
@@ -259,6 +370,10 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
 
   const totalPct = totalAvg > 0 ? Math.min((totalSpent / totalAvg) * 100, 100) : 0;
   const totalOver = totalSpent > totalAvg;
+
+  // When the cards are debited this month — shown until it happens.
+  const billingDay = Math.min(settings.billingDay, daysInMonth(year, month));
+  const cardsUpcoming = cycleStatus(year, month, today, settings.billingDay) === "upcoming";
 
   return (
     <section>
@@ -304,7 +419,7 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
             <Suspense fallback={<ChartFallback />}>
               {activeChart === "months" ? (
                 <MonthlyTrend
-                  allTransactions={allTxs}
+                  allTransactions={visibleTxs}
                   year={year}
                   month={month}
                   excludedCategories={excludedExpenseCategories}
@@ -330,11 +445,7 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
 
       {/* ── Smart Insights ────────────────────────────────────── */}
       {!loadingAvg && (
-        <SmartInsights
-          transactions={transactions}
-          averages={averages}
-          onShowUncategorized={onShowUncategorized}
-        />
+        <SmartInsights insights={insights} onShowUncategorized={onShowUncategorized} />
       )}
 
       {/* ── Summary card ──────────────────────────────────────── */}
@@ -349,7 +460,9 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           <span className="text-sm text-white/60">
             {loadingAvg
               ? "טוען ממוצע..."
-              : `ממוצע: ${Math.round(totalAvg).toLocaleString("he-IL")} ₪`}
+              : totalAvg > 0
+                ? `חודש רגיל: ${Math.round(totalAvg).toLocaleString("he-IL")} ₪`
+                : "אין עדיין חודשים קודמים להשוואה"}
           </span>
         </div>
         {/* Total progress bar */}
@@ -359,22 +472,32 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
             style={{ width: `${totalPct}%` }}
           />
         </div>
-        <div className="flex justify-between mt-2 text-xs text-white/50">
-          <span>{totalPct.toFixed(0)}% מהממוצע</span>
-          <span>
-            {totalOver
-              ? `חריגה של ${Math.round(totalSpent - totalAvg).toLocaleString("he-IL")} ₪`
-              : `נותרו ${Math.round(totalAvg - totalSpent).toLocaleString("he-IL")} ₪`}
-          </span>
-        </div>
+        {totalAvg > 0 && (
+          <div className="flex justify-between mt-2 text-xs text-white/50">
+            <span>{totalPct.toFixed(0)}% מחודש רגיל</span>
+            <span>
+              {totalOver
+                ? `חריגה של ${Math.round(totalSpent - totalAvg).toLocaleString("he-IL")} ₪`
+                : `נותרו ${Math.round(totalAvg - totalSpent).toLocaleString("he-IL")} ₪`}
+            </span>
+          </div>
+        )}
+        {cardsUpcoming && (
+          <p className="mt-2 text-[11px] text-white/60">
+            חיובי האשראי של החודש ירדו מחשבון הבנק ב-{billingDay}/{month}.
+          </p>
+        )}
 
       </div>
+
+      {/* ── Savings profile ─────────────────────────────────────── */}
+      {!loadingAvg && <SavingsProfileCard profile={savingsProfile} />}
 
       {/* ── Savings Insights ────────────────────────────────────── */}
       {!loadingAvg && (
         <SavingsInsightsList
           recurringCharges={recurringCharges}
-          allTransactions={allTxs}
+          allTransactions={visibleTxs}
           profile={financialProfile}
         />
       )}
@@ -390,7 +513,7 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
         </button>
       )}
 
-      {/* ── Recurring Charges ─────────────────────────────────── */}
+      {/* ── Fixed charges ─────────────────────────────────────── */}
       {!loadingAvg && (
         <div className="mb-5">
           <div className="flex items-center gap-2 mb-3 px-1">
@@ -402,47 +525,23 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
             </h3>
             {recurringCharges.length > 0 && (
               <span className="text-[11px] text-slate-400 font-medium">
-                ({recurringCharges.length})
+                ({recurringCharges.length}) · {Math.round(recurring.monthlyTotal).toLocaleString("he-IL")} ₪ לחודש
               </span>
             )}
           </div>
 
-          {/* ── Recurring alerts ──────────────────────────────── */}
-          {recurringAlerts.length > 0 && (
+          {/* A charge that used to come every month and didn't */}
+          {stoppedAlerts.length > 0 && (
             <div className="space-y-2 mb-3">
-              {recurringAlerts.map((alert) => (
+              {stoppedAlerts.map((alert) => (
                 <div
-                  key={`${alert.kind}-${alert.description}`}
-                  className={`flex items-start gap-3 rounded-2xl px-4 py-3 text-sm font-medium border ${
-                    alert.kind === "stopped"
-                      ? "bg-red-50 dark:bg-red-950/30 border-red-200/60 dark:border-red-800/40 text-red-800 dark:text-red-300"
-                      : alert.kind === "amount-changed"
-                      ? "bg-amber-50 dark:bg-amber-950/30 border-amber-200/60 dark:border-amber-800/40 text-amber-800 dark:text-amber-300"
-                      : "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-200/60 dark:border-emerald-800/40 text-emerald-800 dark:text-emerald-300"
-                  }`}
+                  key={alert.key}
+                  className="flex items-start gap-3 rounded-2xl px-4 py-3 text-sm font-medium border bg-amber-50 dark:bg-amber-950/30 border-amber-200/60 dark:border-amber-800/40 text-amber-800 dark:text-amber-300"
                 >
-                  <span className="shrink-0 mt-0.5">
-                    {alert.kind === "stopped" ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                      </svg>
-                    ) : alert.kind === "amount-changed" ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                      </svg>
-                    ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z" clipRule="evenodd" />
-                      </svg>
-                    )}
-                  </span>
-                  <span>
-                    {alert.kind === "stopped"
-                      ? `זוהתה הפסקה של חיוב קבוע: ${alert.description}`
-                      : alert.kind === "amount-changed"
-                      ? `סכום החיוב של ${alert.description} השתנה ב-${Math.abs(alert.diff!).toLocaleString("he-IL")} ש״ח (מ-${alert.previousAmount!.toLocaleString("he-IL")} ל-${alert.currentAmount!.toLocaleString("he-IL")})`
-                      : `זוהה חיוב קבוע חדש: ${alert.description}`}
-                  </span>
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                  </svg>
+                  <span>החיוב הקבוע של {alert.description} לא הגיע החודש — בוטל, או שהחיוב נכשל?</span>
                 </div>
               ))}
             </div>
@@ -451,29 +550,58 @@ export default function Dashboard({ transactions, year, month, onShowUncategoriz
           {recurringCharges.length === 0 ? (
             <div className="rounded-2xl bg-white dark:bg-slate-900 px-4 py-5 shadow-sm border border-slate-200/60 dark:border-slate-700/60 text-center">
               <p className="text-sm text-slate-400">
-                לא זוהו חיובים קבועים עדיין
+                לא זוהו חיובים קבועים החודש
               </p>
-              <p className="text-[11px] text-slate-300 dark:text-slate-500 mt-1">
-                נדרשים לפחות חודשיים של נתונים דומים
+              <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1 leading-relaxed">
+                מנוי או הוראת קבע מזוהים אחרי שני חיובים חודשיים באותו יום ובסכום דומה.
+                אפשר גם לסמן עסקה כחיוב קבוע בלשונית ההוצאות.
               </p>
             </div>
           ) : (
             <div className="space-y-2">
-              {recurringCharges.map((charge) => (
-                <div
-                  key={charge.description}
-                  className="flex items-center gap-3 rounded-2xl bg-white dark:bg-slate-900 px-4 py-3.5 shadow-sm border border-slate-200/60 dark:border-slate-700/60"
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-100 truncate">
-                      {charge.description}
-                    </p>
+              {recurringCharges.map((charge) => {
+                const pending = charge.status !== "charged";
+                return (
+                  <div
+                    key={charge.id}
+                    className={`flex items-center gap-3 rounded-2xl bg-white dark:bg-slate-900 px-4 py-3 shadow-sm border ${
+                      pending ? "border-dashed border-slate-300 dark:border-slate-700" : "border-slate-200/60 dark:border-slate-700/60"
+                    }`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-semibold truncate ${pending ? "text-slate-500 dark:text-slate-400" : "text-slate-800 dark:text-slate-100"}`}>
+                        {charge.description}
+                      </p>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        {FIXED_KIND_LABELS[charge.kind]}
+                        {charge.installment && ` ${charge.installment.number}/${charge.installment.total}`}
+                        {charge.cadence === 2 && " · דו-חודשי"}
+                        {charge.original && (
+                          <span dir="ltr"> · {charge.original.amount.toLocaleString("he-IL")} {charge.original.currency}</span>
+                        )}
+                        {charge.status === "expected" && ` · צפוי סביב ה-${charge.dayOfMonth} בחודש`}
+                        {charge.status === "off-month" && " · החיוב הבא בחודש הבא"}
+                      </p>
+                    </div>
+                    <span
+                      className={`shrink-0 text-sm font-bold tabular-nums ${pending ? "text-slate-400" : "text-slate-700 dark:text-slate-200"}`}
+                      dir="ltr"
+                    >
+                      {Math.round(charge.amount).toLocaleString("he-IL")} ₪
+                    </span>
+                    {charge.kind !== "installment" && (
+                      <button
+                        onClick={() => markNotFixed(charge.key)}
+                        className="shrink-0 p-1.5 -me-1.5 rounded-lg text-slate-300 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-colors"
+                        aria-label={`${charge.description} אינו חיוב קבוע`}
+                        title="זה לא חיוב קבוע — הסר מהרשימה"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
                   </div>
-                  <span className="shrink-0 text-sm font-bold text-slate-700 dark:text-slate-200 tabular-nums" dir="ltr">
-                    {Math.round(charge.amountM).toLocaleString("he-IL")} ₪
-                  </span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
